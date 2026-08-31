@@ -3,8 +3,9 @@ import { EXDB } from "./exdb.js";
 import { SEED } from "./seed.js";
 import {
   configured, getSession, onAuthChange, signIn, signUp, signOut, updatePassword,
-  fetchMyProfile, fetchProfiles, updateUnit,
-  fetchWorkouts, insertWorkout, deleteWorkout, fetchCustom, insertCustom,
+  fetchMyProfile, fetchProfiles, updateUnit, updateDisplayName, updateEmail,
+  fetchWorkouts, insertWorkout, updateWorkout, deleteWorkout,
+  fetchCustom, fetchAllCustom, insertCustom, updateCustom, deleteCustom,
 } from "./db.js";
 
 // ============ CONSTANTS ============
@@ -243,6 +244,7 @@ function MainApp({ session, theme, onToggleTheme }) {
   const [workouts, setWorkouts] = useState([]);
   const [custom, setCustom] = useState([]);
   const [draft, setDraft] = useState(() => lsGet(draftKey(myId), null));
+  const [editing, setEditing] = useState(null); // a saved workout being edited (full object incl. id)
   const [tab, setTab] = useState("log");
   const [toast, setToast] = useState(null);
   const [loadErr, setLoadErr] = useState("");
@@ -300,9 +302,35 @@ function MainApp({ session, theme, onToggleTheme }) {
     catch { flash("Couldn’t delete — are you online?"); }
   };
 
+  const saveEditedWorkout = async (id, sessionData) => {
+    try {
+      const saved = await updateWorkout(id, sessionData);
+      setWorkouts((ws) => ws.map((w) => (w.id === id ? saved : w)));
+      setEditing(null); flash("Workout updated"); setTab("history");
+    } catch { flash("Couldn’t save changes — are you online?"); }
+  };
+
   const addCustom = async (c) => {
     setCustom((cs) => [...cs.filter((x) => norm(x.name) !== norm(c.name)), c]);
     try { await insertCustom(myId, c); } catch { flash("Couldn’t sync custom exercise"); }
+  };
+  const editCustom = async (id, c) => {
+    try { await updateCustom(id, c); flash("Exercise updated"); }
+    catch { flash("Couldn’t update — are you online?"); throw new Error("failed"); }
+    setCustom(await fetchCustom(myId));
+  };
+  const removeCustom = async (id) => {
+    try { await deleteCustom(id); flash("Exercise deleted"); }
+    catch { flash("Couldn’t delete — are you online?"); throw new Error("failed"); }
+    setCustom(await fetchCustom(myId));
+  };
+
+  const saveProfileEdits = async ({ displayName, email }) => {
+    if (displayName && displayName !== profile.display_name) {
+      await updateDisplayName(myId, displayName);
+      setProfile((p) => ({ ...p, display_name: displayName }));
+    }
+    if (email) await updateEmail(email); // triggers Supabase confirmation flow
   };
 
   const importSeed = async () => {
@@ -355,18 +383,22 @@ function MainApp({ session, theme, onToggleTheme }) {
       </nav>
 
       {tab === "log" && (
-        <LogView unit={unit} draft={draft} setDraft={setDraft} workouts={workouts} registry={registry}
-          onFinish={finishWorkout} onAddCustom={addCustom} />
+        <LogView unit={unit} draft={draft} setDraft={setDraft} editing={editing} setEditing={setEditing}
+          workouts={workouts} registry={registry}
+          onFinish={finishWorkout} onSaveEdit={saveEditedWorkout} onAddCustom={addCustom} />
       )}
       {tab === "history" && (
-        <HistoryView unit={unit} workouts={workouts} who={profile.display_name} flash={flash} onDelete={removeWorkout} />
+        <HistoryView unit={unit} workouts={workouts} who={profile.display_name} flash={flash}
+          onDelete={removeWorkout} onEdit={(w) => { setEditing(w); setTab("log"); }} />
       )}
       {tab === "friends" && <FriendsView myId={myId} unit={unit} theme={theme} />}
       {tab === "exercises" && (
-        <ExercisesView registry={registry} workouts={workouts} unit={unit} flash={flash} onAddCustom={addCustom} />
+        <ExercisesView registry={registry} workouts={workouts} unit={unit} flash={flash}
+          myId={myId} onAddCustom={addCustom} onEditCustom={editCustom} onDeleteCustom={removeCustom} />
       )}
       {tab === "settings" && (
-        <SettingsView flash={flash} hasWorkouts={workouts.length > 0} onImportSeed={importSeed} />
+        <SettingsView flash={flash} hasWorkouts={workouts.length > 0} onImportSeed={importSeed}
+          profile={profile} email={session.user.email} onSaveProfile={saveProfileEdits} />
       )}
 
       {toast && <div className="wt-toast">{toast}</div>}
@@ -435,8 +467,13 @@ function FriendsView({ myId, unit, theme }) {
 }
 
 // ============ LOG VIEW ============
-function LogView({ unit, draft, setDraft, workouts, registry, onFinish, onAddCustom }) {
+function LogView({ unit, draft, setDraft, editing, setEditing, workouts, registry, onFinish, onSaveEdit, onAddCustom }) {
   const [picking, setPicking] = useState(false);
+  const isEdit = Boolean(editing);
+  // When editing, the working object is `editing`; otherwise it's `draft`.
+  const current = isEdit ? editing : draft;
+  const setCurrent = isEdit ? ((updater) => setEditing((e) => (typeof updater === "function" ? updater(e) : updater))) : setDraft;
+
   const dayNames = useMemo(() => {
     const c = {};
     workouts.forEach((w) => { c[w.name] = (c[w.name] || 0) + 1; });
@@ -446,7 +483,7 @@ function LogView({ unit, draft, setDraft, workouts, registry, onFinish, onAddCus
     return merged;
   }, [workouts]);
 
-  if (!draft) {
+  if (!current) {
     return (
       <div className="wt-pane">
         <div className="wt-empty">
@@ -465,42 +502,59 @@ function LogView({ unit, draft, setDraft, workouts, registry, onFinish, onAddCus
     );
   }
 
-  const updateEntry = (eid, fn) => setDraft((d) => ({ ...d, entries: d.entries.map((e) => (e.id === eid ? fn(e) : e)) }));
-  const removeEntry = (eid) => setDraft((d) => ({ ...d, entries: d.entries.filter((e) => e.id !== eid) }));
+  // Ensure entries/sets have stable ids for editing an old workout (seed/imported ones may lack them)
+  const entriesWithIds = current.entries.map((e) => ({ ...e, id: e.id || uid() }));
+
+  const updateEntry = (eid, fn) => setCurrent((d) => ({ ...d, entries: (d.entries.map((e) => ({ ...e, id: e.id || uid() }))).map((e) => (e.id === eid ? fn(e) : e)) }));
+  const removeEntry = (eid) => setCurrent((d) => ({ ...d, entries: d.entries.map((e) => ({ ...e, id: e.id || uid() })).filter((e) => e.id !== eid) }));
 
   const addExercise = (meta) => {
-    const last = lastPerformance(workouts, meta.name, draft.id);
+    const last = lastPerformance(workouts, meta.name, current.id);
     const sets = last ? last.sets.map(() => ({ weight: null, reps: "" })) : [{ weight: null, reps: "" }];
-    setDraft((d) => ({ ...d, entries: [...d.entries, { id: uid(), exercise: meta.name, muscle: meta.muscle, sets }] }));
+    setCurrent((d) => ({ ...d, entries: [...d.entries.map((e) => ({ ...e, id: e.id || uid() })), { id: uid(), exercise: meta.name, muscle: meta.muscle, sets }] }));
     setPicking(false);
   };
 
+  const cleaned = () => ({
+    date: current.date, name: current.name,
+    entries: entriesWithIds.map((e) => ({ exercise: e.exercise, muscle: e.muscle, sets: e.sets.filter((s) => s.weight != null || s.reps) })).filter((e) => e.sets.length > 0),
+  });
+
   return (
     <div className="wt-pane">
+      {isEdit && (
+        <div className="wt-editbar">
+          <span>Editing session · {fmtDate(current.date)}</span>
+          <button className="wt-ghost small" onClick={() => setEditing(null)}>Cancel</button>
+        </div>
+      )}
       <div className="wt-session-head">
-        <input className="wt-session-name" list="wt-daynames" value={draft.name} onChange={(e) => setDraft({ ...draft, name: e.target.value })} aria-label="Session name" />
+        <input className="wt-session-name" list="wt-daynames" value={current.name} onChange={(e) => setCurrent({ ...current, entries: entriesWithIds, name: e.target.value })} aria-label="Session name" />
         <datalist id="wt-daynames">{dayNames.map((n) => <option key={n} value={n} />)}</datalist>
-        <input type="date" className="wt-session-date" value={draft.date} onChange={(e) => setDraft({ ...draft, date: e.target.value })} aria-label="Session date" />
+        <input type="date" className="wt-session-date" value={current.date} onChange={(e) => setCurrent({ ...current, entries: entriesWithIds, date: e.target.value })} aria-label="Session date" />
       </div>
 
-      {draft.entries.length === 0 && <p className="wt-hint">No exercises yet. Add one to start logging sets.</p>}
+      {entriesWithIds.length === 0 && <p className="wt-hint">No exercises yet. Add one to start logging sets.</p>}
 
-      {draft.entries.map((entry) => (
-        <EntryCard key={entry.id} entry={entry} unit={unit} workouts={workouts} registry={registry} draftId={draft.id}
+      {entriesWithIds.map((entry) => (
+        <EntryCard key={entry.id} entry={entry} unit={unit} workouts={workouts} registry={registry} draftId={current.id}
           onChange={(fn) => updateEntry(entry.id, fn)} onRemove={() => removeEntry(entry.id)} />
       ))}
 
       <button className="wt-secondary wide" onClick={() => setPicking(true)}>+ Add exercise</button>
 
       <div className="wt-session-actions">
-        <button className="wt-primary" disabled={draft.entries.length === 0}
-          onClick={() => onFinish({
-            date: draft.date, name: draft.name,
-            entries: draft.entries.map((e) => ({ ...e, sets: e.sets.filter((s) => s.weight != null || s.reps) })).filter((e) => e.sets.length > 0),
-          })}>
-          Finish workout
-        </button>
-        <button className="wt-ghost" onClick={() => { if (confirm("Discard this session?")) setDraft(null); }}>Discard</button>
+        {isEdit ? (
+          <>
+            <button className="wt-primary" disabled={entriesWithIds.length === 0} onClick={() => onSaveEdit(editing.id, cleaned())}>Save changes</button>
+            <button className="wt-ghost" onClick={() => setEditing(null)}>Cancel</button>
+          </>
+        ) : (
+          <>
+            <button className="wt-primary" disabled={entriesWithIds.length === 0} onClick={() => onFinish(cleaned())}>Finish workout</button>
+            <button className="wt-ghost" onClick={() => { if (confirm("Discard this session?")) setDraft(null); }}>Discard</button>
+          </>
+        )}
       </div>
 
       {picking && <ExercisePicker registry={registry} workouts={workouts} onPick={addExercise} onClose={() => setPicking(false)} onAddCustom={onAddCustom} />}
@@ -744,10 +798,10 @@ function PickRow({ m, onPick }) {
   );
 }
 
-function CustomForm({ initialName, onSave, onCancel }) {
+function CustomForm({ initialName, initialMuscle, initialEquipment, saveLabel, onSave, onCancel }) {
   const [name, setName] = useState(initialName || "");
-  const [muscle, setMuscle] = useState("chest");
-  const [equipment, setEquipment] = useState("");
+  const [muscle, setMuscle] = useState(initialMuscle || "chest");
+  const [equipment, setEquipment] = useState(initialEquipment || "");
   const muscles = Object.keys(MUSCLE_META).filter((m) => m !== "other");
   return (
     <div className="wt-form">
@@ -759,7 +813,7 @@ function CustomForm({ initialName, onSave, onCancel }) {
       </label>
       <label>Equipment (optional)<input value={equipment} onChange={(e) => setEquipment(e.target.value)} placeholder="e.g. cable, dumbbell" /></label>
       <div className="wt-form-actions">
-        <button className="wt-primary" disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), muscle, equipment: equipment.trim(), source: "custom" })}>Save exercise</button>
+        <button className="wt-primary" disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), muscle, equipment: equipment.trim(), source: "custom" })}>{saveLabel || "Save exercise"}</button>
         <button className="wt-ghost" onClick={onCancel}>Back</button>
       </div>
     </div>
@@ -767,7 +821,7 @@ function CustomForm({ initialName, onSave, onCancel }) {
 }
 
 // ============ HISTORY ============
-function HistoryView({ unit, workouts, onDelete, who, flash, readOnly = false }) {
+function HistoryView({ unit, workouts, onDelete, onEdit, who, flash, readOnly = false }) {
   const [open, setOpen] = useState(null);
   const sorted = [...workouts].sort((a, b) => b.date.localeCompare(a.date));
   if (sorted.length === 0) return <div className="wt-pane"><p className="wt-hint">{readOnly ? "No sessions logged yet." : "No sessions yet. Your finished workouts land here."}</p></div>;
@@ -799,7 +853,10 @@ function HistoryView({ unit, workouts, onDelete, who, flash, readOnly = false })
                 </div>
               ))}
               {!readOnly && (
-                <button className="wt-ghost small danger" onClick={() => { if (confirm(`Delete session from ${fmtDate(w.date)}?`)) onDelete(w.id); }}>Delete session</button>
+                <div className="wt-hist-actions">
+                  <button className="wt-ghost small" onClick={() => onEdit(w)}>✎ Edit session</button>
+                  <button className="wt-ghost small danger" onClick={() => { if (confirm(`Delete session from ${fmtDate(w.date)}?`)) onDelete(w.id); }}>Delete session</button>
+                </div>
               )}
             </div>
           )}
@@ -810,12 +867,17 @@ function HistoryView({ unit, workouts, onDelete, who, flash, readOnly = false })
 }
 
 // ============ EXERCISES LIBRARY ============
-function ExercisesView({ registry, workouts, unit, flash, onAddCustom }) {
+function ExercisesView({ registry, workouts, unit, flash, myId, onAddCustom, onEditCustom, onDeleteCustom }) {
   const [q, setQ] = useState("");
   const [region, setRegion] = useState("All");
   const [adding, setAdding] = useState(false);
   const [openEx, setOpenEx] = useState(null);
+  const [allCustom, setAllCustom] = useState(null); // crew-wide customs with author
+  const [editingId, setEditingId] = useState(null);
   const regions = ["All", "Chest", "Back", "Legs", "Shoulders", "Arms", "Core"];
+
+  const loadCustoms = () => fetchAllCustom().then(setAllCustom).catch(() => setAllCustom([]));
+  useEffect(() => { loadCustoms(); }, []);
 
   const list = useMemo(() => {
     const nq = norm(q);
@@ -832,16 +894,53 @@ function ExercisesView({ registry, workouts, unit, flash, onAddCustom }) {
 
   return (
     <div className="wt-pane">
+      {/* --- Custom exercises management --- */}
+      <div className="wt-settings-block">
+        <div className="wt-settings-title">Custom exercises</div>
+        {!adding ? (
+          <button className="wt-createx" onClick={() => setAdding(true)}>✚ Create custom exercise</button>
+        ) : (
+          <CustomForm initialName="" onCancel={() => setAdding(false)}
+            onSave={async (c) => { await onAddCustom(c); setAdding(false); flash("Exercise added"); loadCustoms(); }} />
+        )}
+        {allCustom === null ? (
+          <p className="wt-hint pad">Loading…</p>
+        ) : allCustom.length === 0 ? (
+          <p className="wt-hint pad">No custom exercises yet. Create one above — everyone in the crew will see it.</p>
+        ) : (
+          <div className="wt-custlist">
+            {allCustom.map((c) => (
+              editingId === c.id ? (
+                <div key={c.id} className="wt-cust-edit">
+                  <CustomForm initialName={c.name} initialMuscle={c.muscle} initialEquipment={c.equipment}
+                    saveLabel="Save changes" onCancel={() => setEditingId(null)}
+                    onSave={async (upd) => { try { await onEditCustom(c.id, upd); setEditingId(null); loadCustoms(); } catch {} }} />
+                </div>
+              ) : (
+                <div key={c.id} className="wt-cust-row" style={{ "--plate": muscleColor(c.muscle) }}>
+                  <span className="wt-plate sm" aria-hidden="true" />
+                  <div className="wt-lib-main">
+                    <span className="wt-pick-name">{c.name}</span>
+                    <span className="wt-pick-meta">{c.muscle}{c.equipment ? ` · ${c.equipment}` : ""} · added by {c.user_id === myId ? "you" : c.author}</span>
+                  </div>
+                  {c.user_id === myId && (
+                    <div className="wt-cust-actions">
+                      <button className="wt-ghost small" onClick={() => setEditingId(c.id)}>Edit</button>
+                      <button className="wt-ghost small danger" onClick={async () => { if (confirm(`Delete “${c.name}”?`)) { try { await onDeleteCustom(c.id); loadCustoms(); } catch {} } }}>Delete</button>
+                    </div>
+                  )}
+                </div>
+              )
+            ))}
+          </div>
+        )}
+      </div>
+
+      {/* --- Full library browser --- */}
       <input className="wt-search" placeholder="Search the library…" value={q} onChange={(e) => setQ(e.target.value)} />
       <div className="wt-regions">
         {regions.map((r) => <button key={r} className={"wt-chip" + (region === r ? " on" : "")} onClick={() => setRegion(r)}>{r}</button>)}
       </div>
-      {!adding ? (
-        <button className="wt-createx" onClick={() => setAdding(true)}>✚ Create custom exercise</button>
-      ) : (
-        <CustomForm initialName={q} onCancel={() => setAdding(false)}
-          onSave={(c) => { onAddCustom(c); setAdding(false); flash("Exercise added"); }} />
-      )}
       <div className="wt-lib">
         {list.map((m) => {
           const last = lastPerformance(workouts, m.name, null);
@@ -867,11 +966,31 @@ function ExercisesView({ registry, workouts, unit, flash, onAddCustom }) {
 }
 
 // ============ SETTINGS ============
-function SettingsView({ flash, hasWorkouts, onImportSeed }) {
+function SettingsView({ flash, hasWorkouts, onImportSeed, profile, email, onSaveProfile }) {
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState("");
   const [busy, setBusy] = useState(false);
+
+  // Profile edit state
+  const [name, setName] = useState(profile.display_name);
+  const [newEmail, setNewEmail] = useState(email || "");
+  const [pErr, setPErr] = useState("");
+  const [pBusy, setPBusy] = useState(false);
+
+  const nameChanged = name.trim() && name.trim() !== profile.display_name;
+  const emailChanged = newEmail.trim() && newEmail.trim() !== (email || "");
+
+  const saveProfile = async () => {
+    setPErr("");
+    if (name.trim().length < 2) { setPErr("Display name must be at least 2 characters."); return; }
+    setPBusy(true);
+    try {
+      await onSaveProfile({ displayName: nameChanged ? name.trim() : null, email: emailChanged ? newEmail.trim() : null });
+      flash(emailChanged ? "Saved — check your email to confirm the new address" : "Profile updated");
+    } catch (e) { setPErr(e.message || "Couldn’t save changes."); }
+    finally { setPBusy(false); }
+  };
 
   const submit = async () => {
     setErr("");
@@ -888,6 +1007,19 @@ function SettingsView({ flash, hasWorkouts, onImportSeed }) {
 
   return (
     <div className="wt-pane">
+      <div className="wt-settings-block">
+        <div className="wt-settings-title">Profile</div>
+        <div className="wt-form">
+          <label>Display name<input value={name} onChange={(e) => { setName(e.target.value); setPErr(""); }} autoComplete="nickname" /></label>
+          <label>Email<input type="email" value={newEmail} onChange={(e) => { setNewEmail(e.target.value); setPErr(""); }} autoComplete="email" inputMode="email" /></label>
+          {emailChanged && <p className="wt-hint">Changing your email sends a confirmation link to the new address; it takes effect once you click it.</p>}
+          {pErr && <div className="wt-err">{pErr}</div>}
+          <div className="wt-form-actions">
+            <button className="wt-primary" disabled={(!nameChanged && !emailChanged) || pBusy} onClick={saveProfile}>{pBusy ? "Saving…" : "Save profile"}</button>
+          </div>
+        </div>
+      </div>
+
       <div className="wt-settings-block">
         <div className="wt-settings-title">Change password</div>
         <div className="wt-form">
@@ -934,6 +1066,12 @@ const CSS = `
 .wt-theme-btn:hover{border-color:var(--accent)}
 .wt-theme-btn.corner{position:absolute;top:16px;right:16px}
 .wt-header-right{display:flex;align-items:center;gap:8px}
+.wt-editbar{display:flex;align-items:center;justify-content:space-between;background:var(--panel2);border:1px solid var(--accent);border-radius:10px;padding:8px 12px;font-size:13px;color:var(--text)}
+.wt-hist-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
+.wt-custlist{display:flex;flex-direction:column;gap:2px;margin-top:8px}
+.wt-cust-row{display:flex;align-items:center;gap:10px;padding:10px 4px;border-bottom:1px solid var(--line)}
+.wt-cust-actions{display:flex;gap:2px;flex:none}
+.wt-cust-edit{border:1px solid var(--accent);border-radius:10px;padding:4px 8px;margin:4px 0}
 .wt-settings-block{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
 .wt-settings-title{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:700;margin-bottom:6px}
 .wt-err{color:#D67B7B;font-size:13px}

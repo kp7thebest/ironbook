@@ -13,19 +13,13 @@
       <stop offset="1" stop-color="#D64545"/>
     </linearGradient>
   </defs>
-  <rect width="512" height="512" rx="112" fill="url(#bg)"/>
-  <!-- subtle diagonal shine -->
-  <rect width="512" height="512" rx="112" fill="#FFFFFF" opacity="0.03"/>
-  <g transform="rotate(-20 256 256)">
-    <!-- bar -->
+  <rect width="512" height="512" fill="url(#bg)"/>
+  <g transform="rotate(-20 256 256) scale(0.8) translate(64 64)">
     <rect x="96" y="242" width="320" height="28" rx="14" fill="#B7ADC7"/>
-    <!-- inner plates (purple, tall) -->
     <rect x="176" y="176" width="34" height="160" rx="14" fill="url(#plate)"/>
     <rect x="302" y="176" width="34" height="160" rx="14" fill="url(#plate)"/>
-    <!-- outer plates (red, shorter) -->
     <rect x="140" y="200" width="30" height="112" rx="12" fill="url(#plate2)"/>
     <rect x="342" y="200" width="30" height="112" rx="12" fill="url(#plate2)"/>
-    <!-- end caps -->
     <rect x="112" y="230" width="22" height="52" rx="10" fill="#8A8296"/>
     <rect x="378" y="230" width="22" height="52" rx="10" fill="#8A8296"/>
   </g>
