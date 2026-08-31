@@ -2,7 +2,7 @@ import { useState, useEffect, useMemo, useRef } from "react";
 import { EXDB } from "./exdb.js";
 import { SEED } from "./seed.js";
 import {
-  configured, getSession, onAuthChange, signIn, signUp, signOut, updatePassword,
+  supabase, configured, getSession, signIn, signUp, signOut, updatePassword, sendPasswordReset,
   fetchMyProfile, fetchProfiles, updateUnit, updateDisplayName, updateEmail,
   fetchWorkouts, insertWorkout, updateWorkout, deleteWorkout,
   fetchCustom, fetchAllCustom, insertCustom, updateCustom, deleteCustom,
@@ -159,12 +159,20 @@ async function exportToExcel(workouts, unit, who) {
 export default function App() {
   const [session, setSession] = useState(undefined); // undefined = checking, null = signed out
   const [theme, setTheme] = useState(() => (lsGet(THEME_KEY, "dark") === "light" ? "light" : "dark"));
+  const [recovering, setRecovering] = useState(false); // arrived via password-reset link
   const toggleTheme = () => setTheme((t) => { const n = t === "dark" ? "light" : "dark"; lsSet(THEME_KEY, n); return n; });
 
   useEffect(() => {
     if (!configured) return;
     getSession().then(setSession);
-    return onAuthChange(setSession);
+    // onAuthChange fires "PASSWORD_RECOVERY" when the reset link is opened.
+    const { data } = supabase.auth.onAuthStateChange((event, s) => {
+      if (event === "PASSWORD_RECOVERY") setRecovering(true);
+      setSession(s);
+    });
+    // Fallback: the reset redirect adds ?reset=1
+    if (new URLSearchParams(window.location.search).get("reset") === "1") setRecovering(true);
+    return () => data.subscription.unsubscribe();
   }, []);
 
   if (!configured) return (
@@ -177,8 +185,45 @@ export default function App() {
     </Shell>
   );
   if (session === undefined) return <LoadingScreen theme={theme} label="Opening Ironbook" />;
+  if (recovering && session) return <ResetPasswordScreen theme={theme} onDone={() => {
+    setRecovering(false);
+    // clean the ?reset=1 out of the URL
+    window.history.replaceState({}, "", window.location.origin + "/");
+  }} />;
   if (!session) return <AuthScreen theme={theme} onToggleTheme={toggleTheme} />;
   return <MainApp key={session.user.id} session={session} theme={theme} onToggleTheme={toggleTheme} />;
+}
+
+// ============ RESET PASSWORD (after clicking the email link) ============
+function ResetPasswordScreen({ theme, onDone }) {
+  const [pw, setPw] = useState("");
+  const [confirm, setConfirm] = useState("");
+  const [err, setErr] = useState("");
+  const [busy, setBusy] = useState(false);
+  const submit = async () => {
+    setErr("");
+    if (pw.length < 6) { setErr("Password must be at least 6 characters."); return; }
+    if (pw !== confirm) { setErr("Passwords don’t match."); return; }
+    setBusy(true);
+    try { await updatePassword(pw); onDone(); }
+    catch (e) { setErr(e.message || "Couldn’t set password. The reset link may have expired — request a new one."); }
+    finally { setBusy(false); }
+  };
+  return (
+    <Shell theme={theme}>
+      <div className="wt-profile-wrap">
+        <div className="wt-eyebrow">Reset password</div>
+        <h1 className="wt-title">IRONBOOK</h1>
+        <p className="wt-profile-sub">Set a new password</p>
+        <div className="wt-form auth">
+          <label>New password<input type="password" value={pw} autoFocus autoComplete="new-password" onChange={(e) => { setPw(e.target.value); setErr(""); }} /></label>
+          <label>Confirm new password<input type="password" value={confirm} autoComplete="new-password" onChange={(e) => { setConfirm(e.target.value); setErr(""); }} onKeyDown={(e) => e.key === "Enter" && submit()} /></label>
+          {err && <div className="wt-err">{err}</div>}
+          <button className="wt-primary" disabled={busy || !pw || !confirm} onClick={submit}>{busy ? "Saving…" : "Set password & sign in"}</button>
+        </div>
+      </div>
+    </Shell>
+  );
 }
 
 function Shell({ theme, children }) {
@@ -187,20 +232,25 @@ function Shell({ theme, children }) {
 
 // ============ AUTH SCREEN ============
 function AuthScreen({ theme, onToggleTheme }) {
-  const [mode, setMode] = useState("signin"); // signin | signup
+  const [mode, setMode] = useState("signin"); // signin | signup | forgot
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
   const [err, setErr] = useState("");
+  const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
 
   const submit = async () => {
-    setErr(""); setBusy(true);
+    setErr(""); setNotice(""); setBusy(true);
     try {
       if (mode === "signup") {
         if (name.trim().length < 2) throw new Error("Pick a display name (2+ characters).");
         if (pw.length < 6) throw new Error("Password must be at least 6 characters.");
         await signUp(email.trim(), pw, name.trim());
+      } else if (mode === "forgot") {
+        if (!email.trim()) throw new Error("Enter your email first.");
+        await sendPasswordReset(email.trim());
+        setNotice("Check your email for a reset link. It may take a minute, and could land in spam.");
       } else {
         await signIn(email.trim(), pw);
       }
@@ -209,29 +259,42 @@ function AuthScreen({ theme, onToggleTheme }) {
     } finally { setBusy(false); }
   };
 
+  const goto = (m) => { setMode(m); setErr(""); setNotice(""); };
+
+  const subtitle = mode === "signin" ? "Welcome back" : mode === "signup" ? "Join the crew" : "Reset your password";
+  const cta = busy ? "One sec…" : mode === "signin" ? "Sign in" : mode === "signup" ? "Create account" : "Send reset link";
+
   return (
     <Shell theme={theme}>
-      <button className="wt-theme-btn corner" onClick={onToggleTheme} aria-label="Toggle dark or light mode">{theme === "dark" ? "☀" : "☾"}</button>
       <div className="wt-profile-wrap">
         <div className="wt-eyebrow">Training log</div>
         <h1 className="wt-title">IRONBOOK</h1>
-        <p className="wt-profile-sub">{mode === "signin" ? "Welcome back" : "Join the crew"}</p>
+        <p className="wt-profile-sub">{subtitle}</p>
         <div className="wt-form auth">
           {mode === "signup" && (
             <label>Display name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Srijan" autoComplete="nickname" /></label>
           )}
-          <label>Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email" /></label>
-          <label>Password<input type="password" value={pw} onChange={(e) => setPw(e.target.value)}
-            autoComplete={mode === "signup" ? "new-password" : "current-password"}
-            onKeyDown={(e) => e.key === "Enter" && submit()} /></label>
+          <label>Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email"
+            onKeyDown={(e) => e.key === "Enter" && mode === "forgot" && submit()} /></label>
+          {mode !== "forgot" && (
+            <label>Password<input type="password" value={pw} onChange={(e) => setPw(e.target.value)}
+              autoComplete={mode === "signup" ? "new-password" : "current-password"}
+              onKeyDown={(e) => e.key === "Enter" && submit()} /></label>
+          )}
           {err && <div className="wt-err">{err}</div>}
-          <button className="wt-primary" disabled={busy || !email || !pw} onClick={submit}>
-            {busy ? "One sec…" : mode === "signin" ? "Sign in" : "Create account"}
-          </button>
-          <button className="wt-ghost" onClick={() => { setMode(mode === "signin" ? "signup" : "signin"); setErr(""); }}>
-            {mode === "signin" ? "New here? Create an account" : "Already have an account? Sign in"}
+          {notice && <div className="wt-notice">{notice}</div>}
+          <button className="wt-primary" disabled={busy || !email || (mode !== "forgot" && !pw)} onClick={submit}>{cta}</button>
+
+          {mode === "signin" && (
+            <button className="wt-ghost small" onClick={() => goto("forgot")}>Forgot password?</button>
+          )}
+          <button className="wt-ghost" onClick={() => goto(mode === "signup" ? "signin" : mode === "forgot" ? "signin" : "signup")}>
+            {mode === "signin" ? "New here? Create an account" : mode === "signup" ? "Already have an account? Sign in" : "← Back to sign in"}
           </button>
         </div>
+        <button className="wt-theme-inline" onClick={onToggleTheme} aria-label="Toggle dark or light mode">
+          {theme === "dark" ? "☀ Light mode" : "☾ Dark mode"}
+        </button>
       </div>
     </Shell>
   );
@@ -1053,6 +1116,7 @@ const CSS = `
 @import url('https://fonts.googleapis.com/css2?family=Barlow+Condensed:wght@600;700&family=Barlow:wght@400;500;600&display=swap');
 .wt-root{font-family:'Barlow',-apple-system,'Segoe UI',sans-serif;background:var(--bg);color:var(--text);min-height:100vh;
   max-width:560px;margin:0 auto;padding:16px 14px 60px;box-sizing:border-box;position:relative}
+.wt-root{padding-top:calc(16px + env(safe-area-inset-top));padding-left:calc(14px + env(safe-area-inset-left));padding-right:calc(14px + env(safe-area-inset-right))}
 .wt-root.theme-dark{--bg:#121018;--panel:#1C1926;--panel2:#241F30;--line:#332C44;--text:#EDEAF3;--dim:#9C93AE;
   --accent:#5F3687;--accent-soft:#7E52B5;--accent-ink:#F5F3FB;color-scheme:dark}
 .wt-root.theme-light{--bg:#F7F5FB;--panel:#FFFFFF;--panel2:#F1EDF9;--line:#DDD5EE;--text:#17131F;--dim:#6B6380;
@@ -1064,7 +1128,9 @@ const CSS = `
 .wt-title::after{content:'';display:block;width:44px;height:4px;background:var(--accent);margin-top:6px}
 .wt-theme-btn{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;width:34px;height:34px;font-size:15px;cursor:pointer;display:inline-flex;align-items:center;justify-content:center;flex:none}
 .wt-theme-btn:hover{border-color:var(--accent)}
-.wt-theme-btn.corner{position:absolute;top:16px;right:16px}
+.wt-theme-btn.corner{position:absolute;top:calc(16px + env(safe-area-inset-top));right:calc(14px + env(safe-area-inset-right));z-index:5}
+.wt-theme-inline{margin-top:22px;background:var(--panel);border:1px solid var(--line);color:var(--dim);font:inherit;font-size:13px;font-weight:600;padding:9px 18px;border-radius:999px;cursor:pointer}
+.wt-theme-inline:hover{border-color:var(--accent);color:var(--text)}
 .wt-header-right{display:flex;align-items:center;gap:8px}
 .wt-editbar{display:flex;align-items:center;justify-content:space-between;background:var(--panel2);border:1px solid var(--accent);border-radius:10px;padding:8px 12px;font-size:13px;color:var(--text)}
 .wt-hist-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
@@ -1076,6 +1142,7 @@ const CSS = `
 .wt-settings-title{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:700;margin-bottom:6px}
 .wt-err{color:#D67B7B;font-size:13px}
 .wt-err.center{text-align:center;width:auto}
+.wt-notice{color:#7FB88A;font-size:13px;background:var(--panel2);border-radius:8px;padding:9px 11px;text-align:center}
 .wt-unit{display:flex;border:1px solid var(--line);border-radius:8px;overflow:hidden}
 .wt-unit-btn{background:transparent;border:0;color:var(--dim);padding:7px 13px;font:inherit;font-weight:600;cursor:pointer}
 .wt-unit-btn.on{background:var(--accent);color:var(--accent-ink)}
