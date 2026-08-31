@@ -1,0 +1,10 @@
+{
+  "name": "Ironbook",
+  "short_name": "Ironbook",
+  "description": "Workout tracker for our crew",
+  "start_url": "/",
+  "display": "standalone",
+  "background_color": "#121018",
+  "theme_color": "#5F3687",
+  "icons": [{ "src": "/icon.svg", "sizes": "any", "type": "image/svg+xml", "purpose": "any" }]
+}
