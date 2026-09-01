@@ -440,7 +440,7 @@ function MainApp({ session, theme, onToggleTheme }) {
       </header>
 
       <nav className="wt-tabs">
-        {[["log", "Log"], ["history", "History"], ["friends", "Friends"], ["exercises", "Library"], ["settings", "Settings"]].map(([id, label]) => (
+        {[["log", "Log"], ["history", "History"], ["calendar", "Calendar"], ["friends", "Friends"], ["exercises", "Library"], ["settings", "Settings"]].map(([id, label]) => (
           <button key={id} className={"wt-tab" + (tab === id ? " on" : "")} onClick={() => setTab(id)}>{label}</button>
         ))}
       </nav>
@@ -455,6 +455,7 @@ function MainApp({ session, theme, onToggleTheme }) {
           onDelete={removeWorkout} onEdit={(w) => { setEditing(w); setTab("log"); }} />
       )}
       {tab === "friends" && <FriendsView myId={myId} unit={unit} theme={theme} />}
+      {tab === "calendar" && <CalendarView myId={myId} myName={profile.display_name} myWorkouts={workouts} />}
       {tab === "exercises" && (
         <ExercisesView registry={registry} workouts={workouts} unit={unit} flash={flash}
           myId={myId} onAddCustom={addCustom} onEditCustom={editCustom} onDeleteCustom={removeCustom} />
@@ -477,6 +478,99 @@ async function flushQueue(myId, setWorkouts) {
     try { await insertWorkout(myId, w); } catch { remaining.push(w); }
   }
   remaining.length ? lsSet(queueKey(myId), remaining) : lsDel(queueKey(myId));
+}
+
+// ============ CALENDAR ============
+function CalendarView({ myId, myName, myWorkouts }) {
+  const [profiles, setProfiles] = useState(null);
+  const [viewId, setViewId] = useState(myId);
+  const [viewName, setViewName] = useState(myName);
+  const [data, setData] = useState(myWorkouts); // workouts of whoever is being viewed
+  const [cursor, setCursor] = useState(() => { const d = new Date(); return { y: d.getFullYear(), m: d.getMonth() }; });
+  const [loading, setLoading] = useState(false);
+  const [sel, setSel] = useState(null); // selected day string
+
+  useEffect(() => { fetchProfiles().then(setProfiles).catch(() => setProfiles([])); }, []);
+
+  const switchTo = async (p) => {
+    setViewId(p.id); setViewName(p.display_name); setSel(null);
+    if (p.id === myId) { setData(myWorkouts); return; }
+    setLoading(true);
+    try { setData(await fetchWorkouts(p.id)); } catch { setData([]); }
+    setLoading(false);
+  };
+
+  // Map date-string -> list of workout names that day
+  const byDay = useMemo(() => {
+    const m = {};
+    (data || []).forEach((w) => { (m[w.date] = m[w.date] || []).push(w.name); });
+    return m;
+  }, [data]);
+
+  const monthName = new Date(cursor.y, cursor.m, 1).toLocaleDateString(undefined, { month: "long", year: "numeric" });
+  const firstDow = new Date(cursor.y, cursor.m, 1).getDay(); // 0=Sun
+  const daysInMonth = new Date(cursor.y, cursor.m + 1, 0).getDate();
+  const todayS = todayStr();
+
+  const cells = [];
+  for (let i = 0; i < firstDow; i++) cells.push(null);
+  for (let d = 1; d <= daysInMonth; d++) {
+    const ds = `${cursor.y}-${String(cursor.m + 1).padStart(2, "0")}-${String(d).padStart(2, "0")}`;
+    cells.push({ d, ds, names: byDay[ds] || [] });
+  }
+
+  const move = (delta) => setCursor((c) => {
+    let m = c.m + delta, y = c.y;
+    if (m < 0) { m = 11; y--; } if (m > 11) { m = 0; y++; }
+    return { y, m };
+  });
+
+  const monthCount = Object.entries(byDay).filter(([ds]) => ds.startsWith(`${cursor.y}-${String(cursor.m + 1).padStart(2, "0")}`)).length;
+
+  return (
+    <div className="wt-pane">
+      {profiles && profiles.length > 1 && (
+        <div className="wt-cal-people">
+          {profiles.map((p) => (
+            <button key={p.id} className={"wt-chip sm" + (viewId === p.id ? " on" : "")} onClick={() => switchTo(p)}>
+              {p.id === myId ? "You" : p.display_name}
+            </button>
+          ))}
+        </div>
+      )}
+
+      <div className="wt-cal-head">
+        <button className="wt-cal-nav" onClick={() => move(-1)} aria-label="Previous month">‹</button>
+        <div className="wt-cal-title">{monthName}</div>
+        <button className="wt-cal-nav" onClick={() => move(1)} aria-label="Next month">›</button>
+      </div>
+      <div className="wt-cal-sub">{loading ? "Loading…" : `${viewId === myId ? "You" : viewName} · ${monthCount} session${monthCount === 1 ? "" : "s"} this month`}</div>
+
+      <div className="wt-cal-grid">
+        {["S", "M", "T", "W", "T", "F", "S"].map((d, i) => <div key={i} className="wt-cal-dow">{d}</div>)}
+        {cells.map((c, i) => c === null ? <div key={i} className="wt-cal-cell empty" /> : (
+          <button key={i} className={"wt-cal-cell" + (c.names.length ? " has" : "") + (c.ds === todayS ? " today" : "") + (sel === c.ds ? " sel" : "")}
+            onClick={() => setSel(sel === c.ds ? null : c.ds)} disabled={!c.names.length && c.ds !== todayS}>
+            <span className="wt-cal-num">{c.d}</span>
+            {c.names.length > 0 && <span className="wt-cal-dot" />}
+          </button>
+        ))}
+      </div>
+
+      {sel && (
+        <div className="wt-cal-detail">
+          <div className="wt-cal-detail-date">{fmtDate(sel)}</div>
+          {byDay[sel] && byDay[sel].length ? (
+            <div className="wt-cal-detail-list">
+              {byDay[sel].map((n, i) => <span key={i} className="wt-cal-tag">{n}</span>)}
+            </div>
+          ) : <div className="wt-hint">No workout logged this day.</div>}
+        </div>
+      )}
+
+      <div className="wt-cal-legend"><span className="wt-cal-dot" /> workout day · tap a day for details</div>
+    </div>
+  );
 }
 
 // ============ FRIENDS ============
@@ -580,7 +674,7 @@ function LogView({ unit, draft, setDraft, editing, setEditing, workouts, registr
 
   const cleaned = () => ({
     date: current.date, name: current.name,
-    entries: entriesWithIds.map((e) => ({ exercise: e.exercise, muscle: e.muscle, sets: e.sets.filter((s) => s.weight != null || s.reps) })).filter((e) => e.sets.length > 0),
+    entries: entriesWithIds.map((e) => ({ exercise: e.exercise, muscle: e.muscle, sets: e.sets.filter((s) => s.weight != null || s.reps).map((s) => ({ weight: s.weight != null ? s.weight : null, reps: s.reps || "" })) })).filter((e) => e.sets.length > 0),
   });
 
   return (
@@ -685,7 +779,14 @@ function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemov
   const imgId = meta && meta.img;
 
   const setSet = (i, field, val) => onChange((e) => {
-    const sets = e.sets.map((s, j) => (j === i ? { ...s, [field]: field === "weight" ? displayToKg(val, unit) : val } : s));
+    const sets = e.sets.map((s, j) => {
+      if (j !== i) return s;
+      if (field === "weight") {
+        // Keep the raw text (so "22." or "22.5" type smoothly) and derive kg from it.
+        return { ...s, wStr: val, weight: displayToKg(val, unit) };
+      }
+      return { ...s, [field]: val };
+    });
     return { ...e, sets };
   });
   const addSet = () => onChange((e) => {
@@ -726,8 +827,8 @@ function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemov
         {entry.sets.map((s, i) => (
           <div className="wt-set-row" key={i}>
             <span className="wt-set-n">{i + 1}</span>
-            <input inputMode="decimal" placeholder={last && last.sets[i] && last.sets[i].weight != null ? String(kgToDisplay(last.sets[i].weight, unit)) : "–"}
-              value={s.weight != null ? kgToDisplay(s.weight, unit) : ""} onChange={(e) => setSet(i, "weight", e.target.value)} aria-label={`Set ${i + 1} weight`} />
+            <input inputMode="decimal" pattern="[0-9]*[.,]?[0-9]*" placeholder={last && last.sets[i] && last.sets[i].weight != null ? String(kgToDisplay(last.sets[i].weight, unit)) : "–"}
+              value={s.wStr != null ? s.wStr : (s.weight != null ? kgToDisplay(s.weight, unit) : "")} onChange={(e) => setSet(i, "weight", e.target.value)} aria-label={`Set ${i + 1} weight`} />
             <input inputMode="numeric" placeholder={last && last.sets[i] ? (last.sets[i].reps || "–") : "e.g. 8 or 6,6"}
               value={s.reps || ""} onChange={(e) => setSet(i, "reps", e.target.value)} aria-label={`Set ${i + 1} reps`} />
             <button className="wt-x dim" onClick={() => dropSet(i)} aria-label={`Remove set ${i + 1}`}>✕</button>
@@ -1132,6 +1233,29 @@ const CSS = `
 .wt-theme-inline{margin-top:22px;background:var(--panel);border:1px solid var(--line);color:var(--dim);font:inherit;font-size:13px;font-weight:600;padding:9px 18px;border-radius:999px;cursor:pointer}
 .wt-theme-inline:hover{border-color:var(--accent);color:var(--text)}
 .wt-header-right{display:flex;align-items:center;gap:8px}
+.wt-cal-people{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px}
+.wt-cal-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
+.wt-cal-nav{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;width:36px;height:36px;font-size:20px;cursor:pointer;flex:none}
+.wt-cal-nav:hover{border-color:var(--accent)}
+.wt-cal-title{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:700;flex:1;text-align:center}
+.wt-cal-sub{font-size:12px;letter-spacing:.06em;text-transform:uppercase;color:var(--dim);text-align:center;margin-top:-4px}
+.wt-cal-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:5px;margin-top:6px}
+.wt-cal-dow{text-align:center;font-size:11px;color:var(--dim);font-weight:600;padding:2px 0}
+.wt-cal-cell{position:relative;aspect-ratio:1;background:var(--panel);border:1px solid var(--line);border-radius:9px;color:var(--text);font:inherit;cursor:pointer;display:flex;align-items:flex-start;justify-content:flex-start;padding:6px}
+.wt-cal-cell.empty{background:transparent;border:0}
+.wt-cal-cell:disabled{cursor:default;opacity:.55}
+.wt-cal-cell.has{background:var(--panel2);border-color:var(--accent)}
+.wt-cal-cell.today{outline:2px solid var(--accent);outline-offset:-1px}
+.wt-cal-cell.sel{background:var(--accent);color:var(--accent-ink)}
+.wt-cal-num{font-size:13px;font-weight:600}
+.wt-cal-dot{position:absolute;bottom:6px;right:6px;width:7px;height:7px;border-radius:50%;background:var(--accent)}
+.wt-cal-cell.sel .wt-cal-dot{background:var(--accent-ink)}
+.wt-cal-detail{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:12px;margin-top:10px}
+.wt-cal-detail-date{font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:700;margin-bottom:6px}
+.wt-cal-detail-list{display:flex;gap:6px;flex-wrap:wrap}
+.wt-cal-tag{background:var(--panel2);border:1px solid var(--accent);color:var(--text);border-radius:999px;padding:4px 12px;font-size:13px;text-transform:capitalize}
+.wt-cal-legend{display:flex;align-items:center;gap:8px;color:var(--dim);font-size:12px;margin-top:12px;position:relative;padding-left:2px}
+.wt-cal-legend .wt-cal-dot{position:static}
 .wt-editbar{display:flex;align-items:center;justify-content:space-between;background:var(--panel2);border:1px solid var(--accent);border-radius:10px;padding:8px 12px;font-size:13px;color:var(--text)}
 .wt-hist-actions{display:flex;gap:6px;justify-content:flex-end;flex-wrap:wrap}
 .wt-custlist{display:flex;flex-direction:column;gap:2px;margin-top:8px}
