@@ -3,7 +3,7 @@ import { EXDB } from "./exdb.js";
 import { SEED } from "./seed.js";
 import {
   supabase, configured, getSession, signIn, signUp, signOut, updatePassword, sendPasswordReset,
-  fetchMyProfile, fetchProfiles, updateUnit, updateDisplayName, updateEmail,
+  fetchMyProfile, fetchProfiles, updateUnit, updatePrivacy, updateDisplayName, updateEmail,
   fetchWorkouts, insertWorkout, updateWorkout, deleteWorkout,
   fetchCustom, fetchAllCustom, insertCustom, updateCustom, deleteCustom,
 } from "./db.js";
@@ -396,6 +396,12 @@ function MainApp({ session, theme, onToggleTheme }) {
     if (email) await updateEmail(email); // triggers Supabase confirmation flow
   };
 
+  const togglePrivacy = async (isPrivate) => {
+    setProfile((p) => ({ ...p, is_private: isPrivate }));
+    try { await updatePrivacy(myId, isPrivate); flash(isPrivate ? "Profile is now private" : "Profile is now visible to the crew"); }
+    catch { setProfile((p) => ({ ...p, is_private: !isPrivate })); flash("Couldn’t update privacy"); }
+  };
+
   const importSeed = async () => {
     flash("Importing spreadsheet history…");
     try {
@@ -462,7 +468,7 @@ function MainApp({ session, theme, onToggleTheme }) {
       )}
       {tab === "settings" && (
         <SettingsView flash={flash} hasWorkouts={workouts.length > 0} onImportSeed={importSeed}
-          profile={profile} email={session.user.email} onSaveProfile={saveProfileEdits} />
+          profile={profile} email={session.user.email} onSaveProfile={saveProfileEdits} onTogglePrivacy={togglePrivacy} />
       )}
 
       {toast && <div className="wt-toast">{toast}</div>}
@@ -640,19 +646,39 @@ function LogView({ unit, draft, setDraft, editing, setEditing, workouts, registr
     return merged;
   }, [workouts]);
 
+  // Start a session, pre-filling the exercise list from the most recent workout of the same name.
+  // Sets are created empty (blank weight/reps) so you just fill in today's numbers; each card still
+  // shows the "last time" figures. Pass prefill=false for a blank start.
+  const startWorkout = (name, prefill = true) => {
+    let entries = [];
+    if (prefill) {
+      const prev = [...workouts].filter((w) => norm(w.name) === norm(name)).sort((a, b) => b.date.localeCompare(a.date))[0];
+      if (prev) {
+        entries = prev.entries.map((e) => ({
+          id: uid(), exercise: e.exercise, muscle: e.muscle,
+          sets: (e.sets && e.sets.length ? e.sets : [{}]).map(() => ({ weight: null, reps: "" })),
+        }));
+      }
+    }
+    setDraft({ id: uid(), date: todayStr(), name, entries });
+  };
+
   if (!current) {
     return (
       <div className="wt-pane">
         <div className="wt-empty">
           <div className="wt-empty-big">Ready to lift?</div>
-          <p>Pick today’s workout — every exercise you log shows what you did last time, plus how similar movements went.</p>
+          <p>Pick today’s workout — we’ll pre-load the same exercises you did last time for that split, ready to fill in.</p>
           <div className="wt-quickdays">
             {dayNames.slice(0, 11).map((n) => (
-              <button key={n} className="wt-chip" onClick={() => setDraft({ id: uid(), date: todayStr(), name: n, entries: [] })}>{n}</button>
+              <button key={n} className="wt-chip" onClick={() => startWorkout(n)}>{n}</button>
             ))}
           </div>
-          <button className="wt-primary" onClick={() => setDraft({ id: uid(), date: todayStr(), name: dayNames[0] || "workout", entries: [] })}>
+          <button className="wt-primary" onClick={() => startWorkout(dayNames[0] || "workout")}>
             Start workout
+          </button>
+          <button className="wt-ghost small" onClick={() => setDraft({ id: uid(), date: todayStr(), name: dayNames[0] || "workout", entries: [] })}>
+            or start empty
           </button>
         </div>
       </div>
@@ -829,8 +855,8 @@ function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemov
             <span className="wt-set-n">{i + 1}</span>
             <input inputMode="decimal" pattern="[0-9]*[.,]?[0-9]*" placeholder={last && last.sets[i] && last.sets[i].weight != null ? String(kgToDisplay(last.sets[i].weight, unit)) : "–"}
               value={s.wStr != null ? s.wStr : (s.weight != null ? kgToDisplay(s.weight, unit) : "")} onChange={(e) => setSet(i, "weight", e.target.value)} aria-label={`Set ${i + 1} weight`} />
-            <input inputMode="numeric" placeholder={last && last.sets[i] ? (last.sets[i].reps || "–") : "e.g. 8 or 6,6"}
-              value={s.reps || ""} onChange={(e) => setSet(i, "reps", e.target.value)} aria-label={`Set ${i + 1} reps`} />
+            <input inputMode="text" pattern="[0-9,]*" placeholder={last && last.sets[i] ? (last.sets[i].reps || "–") : "e.g. 8 or 6,6"}
+              value={s.reps || ""} onChange={(e) => setSet(i, "reps", e.target.value.replace(/[^0-9,]/g, ""))} aria-label={`Set ${i + 1} reps`} />
             <button className="wt-x dim" onClick={() => dropSet(i)} aria-label={`Remove set ${i + 1}`}>✕</button>
           </div>
         ))}
@@ -953,12 +979,22 @@ function ExercisePicker({ registry, workouts, onPick, onClose, onAddCustom }) {
 }
 
 function PickRow({ m, onPick }) {
+  const [showDemo, setShowDemo] = useState(false);
   return (
-    <button className="wt-pick-row" style={{ "--plate": muscleColor(m.muscle) }} onClick={() => onPick(m)}>
-      <span className="wt-plate sm" aria-hidden="true" />
-      <span className="wt-pick-name">{m.name}</span>
-      <span className="wt-pick-meta">{m.muscle}{m.equipment ? ` · ${m.equipment}` : ""}{m.source === "custom" ? " · custom" : ""}</span>
-    </button>
+    <div className="wt-pick-wrap" style={{ "--plate": muscleColor(m.muscle) }}>
+      <div className="wt-pick-row-inner">
+        <button className="wt-pick-row" onClick={() => onPick(m)}>
+          <span className="wt-plate sm" aria-hidden="true" />
+          <span className="wt-pick-name">{m.name}</span>
+          <span className="wt-pick-meta">{m.muscle}{m.equipment ? ` · ${m.equipment}` : ""}{m.source === "custom" ? " · custom" : ""}</span>
+        </button>
+        {m.img && (
+          <button className={"wt-pick-demo" + (showDemo ? " on" : "")} onClick={(e) => { e.stopPropagation(); setShowDemo((v) => !v); }}
+            aria-label={`Preview ${m.name} demo`} title="Preview demo">▶</button>
+        )}
+      </div>
+      {showDemo && m.img && <ExerciseAnim imgId={m.img} name={m.name} />}
+    </div>
   );
 }
 
@@ -1130,7 +1166,7 @@ function ExercisesView({ registry, workouts, unit, flash, myId, onAddCustom, onE
 }
 
 // ============ SETTINGS ============
-function SettingsView({ flash, hasWorkouts, onImportSeed, profile, email, onSaveProfile }) {
+function SettingsView({ flash, hasWorkouts, onImportSeed, profile, email, onSaveProfile, onTogglePrivacy }) {
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState("");
@@ -1182,6 +1218,19 @@ function SettingsView({ flash, hasWorkouts, onImportSeed, profile, email, onSave
             <button className="wt-primary" disabled={(!nameChanged && !emailChanged) || pBusy} onClick={saveProfile}>{pBusy ? "Saving…" : "Save profile"}</button>
           </div>
         </div>
+      </div>
+
+      <div className="wt-settings-block">
+        <div className="wt-settings-title">Privacy</div>
+        <label className="wt-toggle-row">
+          <div>
+            <div className="wt-toggle-label">Private profile</div>
+            <div className="wt-hint">When on, other members can’t see your workouts or find you in Friends or Calendar.</div>
+          </div>
+          <button role="switch" aria-checked={!!profile.is_private} className={"wt-switch-toggle" + (profile.is_private ? " on" : "")} onClick={() => onTogglePrivacy(!profile.is_private)}>
+            <span className="wt-switch-knob" />
+          </button>
+        </label>
       </div>
 
       <div className="wt-settings-block">
@@ -1263,6 +1312,12 @@ const CSS = `
 .wt-cust-actions{display:flex;gap:2px;flex:none}
 .wt-cust-edit{border:1px solid var(--accent);border-radius:10px;padding:4px 8px;margin:4px 0}
 .wt-settings-block{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:14px}
+.wt-toggle-row{display:flex;align-items:center;justify-content:space-between;gap:14px;cursor:pointer}
+.wt-toggle-label{font-weight:600;font-size:15px;margin-bottom:2px}
+.wt-switch-toggle{flex:none;width:48px;height:28px;border-radius:999px;background:var(--line);border:0;position:relative;cursor:pointer;transition:background .15s}
+.wt-switch-toggle.on{background:var(--accent)}
+.wt-switch-knob{position:absolute;top:3px;left:3px;width:22px;height:22px;border-radius:50%;background:#fff;transition:left .15s}
+.wt-switch-toggle.on .wt-switch-knob{left:23px}
 .wt-settings-title{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:700;margin-bottom:6px}
 .wt-err{color:#D67B7B;font-size:13px}
 .wt-err.center{text-align:center;width:auto}
@@ -1354,8 +1409,12 @@ const CSS = `
 .wt-picker-list{overflow-y:auto;flex:1;margin:10px 0;display:flex;flex-direction:column;gap:2px}
 .wt-picker-label{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim);padding:6px 4px}
 .wt-picker-title{flex:1;font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:700;padding:6px 2px}
-.wt-pick-row{display:flex;align-items:center;gap:10px;background:none;border:0;color:var(--text);font:inherit;text-align:left;padding:10px 6px;border-radius:8px;cursor:pointer}
-.wt-pick-row:hover{background:var(--panel)}
+.wt-pick-row{display:flex;align-items:center;gap:10px;background:none;border:0;color:var(--text);font:inherit;text-align:left;padding:10px 6px;border-radius:8px;cursor:pointer;flex:1;min-width:0}
+.wt-pick-wrap{border-radius:8px}
+.wt-pick-row-inner{display:flex;align-items:center;gap:4px}
+.wt-pick-row-inner:hover{background:var(--panel)}
+.wt-pick-demo{background:none;border:1px solid var(--line);border-radius:8px;color:var(--dim);font-size:12px;width:32px;height:32px;flex:none;cursor:pointer;margin-right:4px}
+.wt-pick-demo.on,.wt-pick-demo:hover{border-color:var(--plate);color:var(--text)}
 .wt-pick-name{text-transform:capitalize;font-weight:500;flex:none;max-width:55%}
 .wt-pick-meta{color:var(--dim);font-size:12px;text-transform:capitalize;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
 .wt-nomatch{display:flex;flex-direction:column;gap:12px;align-items:center;text-align:center;padding:22px 12px;color:var(--dim)}

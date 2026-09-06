@@ -70,6 +70,10 @@ export async function updateUnit(userId, unit) {
   const { error } = await supabase.from("profiles").update({ unit }).eq("id", userId);
   if (error) throw error;
 }
+export async function updatePrivacy(userId, isPrivate) {
+  const { error } = await supabase.from("profiles").update({ is_private: isPrivate }).eq("id", userId);
+  if (error) throw error;
+}
 export async function updateDisplayName(userId, displayName) {
   const { error } = await supabase.from("profiles").update({ display_name: displayName }).eq("id", userId);
   if (error) throw error;
