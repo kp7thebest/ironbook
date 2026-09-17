@@ -651,16 +651,18 @@ function LogView({ unit, draft, setDraft, editing, setEditing, workouts, registr
   // shows the "last time" figures. Pass prefill=false for a blank start.
   const startWorkout = (name, prefill = true) => {
     let entries = [];
+    let from = null;
     if (prefill) {
       const prev = [...workouts].filter((w) => norm(w.name) === norm(name)).sort((a, b) => b.date.localeCompare(a.date))[0];
       if (prev) {
+        from = prev.date;
         entries = prev.entries.map((e) => ({
           id: uid(), exercise: e.exercise, muscle: e.muscle,
           sets: (e.sets && e.sets.length ? e.sets : [{}]).map(() => ({ weight: null, reps: "" })),
         }));
       }
     }
-    setDraft({ id: uid(), date: todayStr(), name, entries });
+    setDraft({ id: uid(), date: todayStr(), name, entries, prefilledFrom: from, prefillTried: prefill });
   };
 
   if (!current) {
@@ -703,6 +705,44 @@ function LogView({ unit, draft, setDraft, editing, setEditing, workouts, registr
     entries: entriesWithIds.map((e) => ({ exercise: e.exercise, muscle: e.muscle, sets: e.sets.filter((s) => s.weight != null || s.reps).map((s) => ({ weight: s.weight != null ? s.weight : null, reps: s.reps || "" })) })).filter((e) => e.sets.length > 0),
   });
 
+  // ---- drag to reorder exercises ----
+  const cardRefs = useRef([]);
+  const dragRef = useRef(null);
+  const [dragIdx, setDragIdx] = useState(null);
+  const [dragDy, setDragDy] = useState(0);
+
+  const moveEntry = (from, to) => setCurrent((d) => {
+    const list = d.entries.map((e) => ({ ...e, id: e.id || uid() }));
+    if (to < 0 || to >= list.length || from === to) return d;
+    const [moved] = list.splice(from, 1);
+    list.splice(to, 0, moved);
+    return { ...d, entries: list };
+  });
+
+  const onDragStart = (i, e) => {
+    const rects = cardRefs.current.map((el) => (el ? el.getBoundingClientRect() : null));
+    dragRef.current = { from: i, target: i, startY: e.clientY, centers: rects.map((r) => (r ? r.top + r.height / 2 : 0)) };
+    setDragIdx(i); setDragDy(0);
+    try { e.currentTarget.setPointerCapture(e.pointerId); } catch { /* older browsers */ }
+  };
+  const onDragMove = (e) => {
+    const st = dragRef.current; if (!st) return;
+    const dy = e.clientY - st.startY;
+    setDragDy(dy);
+    const dragged = st.centers[st.from] + dy;
+    let target = st.from;
+    for (let j = 0; j < st.centers.length; j++) {
+      if (j < st.from && dragged < st.centers[j]) { target = Math.min(target, j); }
+      if (j > st.from && dragged > st.centers[j]) { target = Math.max(target, j); }
+    }
+    st.target = target;
+  };
+  const onDragEnd = () => {
+    const st = dragRef.current; if (!st) return;
+    if (st.target !== st.from) moveEntry(st.from, st.target);
+    dragRef.current = null; setDragIdx(null); setDragDy(0);
+  };
+
   return (
     <div className="wt-pane">
       {isEdit && (
@@ -717,11 +757,29 @@ function LogView({ unit, draft, setDraft, editing, setEditing, workouts, registr
         <input type="date" className="wt-session-date" value={current.date} onChange={(e) => setCurrent({ ...current, entries: entriesWithIds, date: e.target.value })} aria-label="Session date" />
       </div>
 
+      {!isEdit && current.prefillTried && (
+        current.prefilledFrom
+          ? <div className="wt-prefill-note">Loaded your last <strong>{current.name}</strong> split from {fmtDate(current.prefilledFrom)} — fill in today’s numbers.</div>
+          : <div className="wt-prefill-note none">No previous <strong>{current.name}</strong> session on your account yet, so this one starts empty. Next time it’ll pre-load.</div>
+      )}
+
       {entriesWithIds.length === 0 && <p className="wt-hint">No exercises yet. Add one to start logging sets.</p>}
 
-      {entriesWithIds.map((entry) => (
-        <EntryCard key={entry.id} entry={entry} unit={unit} workouts={workouts} registry={registry} draftId={current.id}
-          onChange={(fn) => updateEntry(entry.id, fn)} onRemove={() => removeEntry(entry.id)} />
+      {entriesWithIds.length > 1 && <div className="wt-reorder-hint">Drag ⠿ to reorder exercises</div>}
+
+      {entriesWithIds.map((entry, i) => (
+        <div key={entry.id} ref={(el) => (cardRefs.current[i] = el)}
+          className={"wt-card-wrap" + (dragIdx === i ? " dragging" : "")}
+          style={dragIdx === i ? { transform: `translateY(${dragDy}px)` } : undefined}>
+          <EntryCard entry={entry} unit={unit} workouts={workouts} registry={registry} draftId={current.id}
+            onChange={(fn) => updateEntry(entry.id, fn)} onRemove={() => removeEntry(entry.id)}
+            dragHandle={entriesWithIds.length > 1 ? {
+              onPointerDown: (e) => onDragStart(i, e),
+              onPointerMove: onDragMove,
+              onPointerUp: onDragEnd,
+              onPointerCancel: onDragEnd,
+            } : null} />
+        </div>
       ))}
 
       <button className="wt-secondary wide" onClick={() => setPicking(true)}>+ Add exercise</button>
@@ -795,7 +853,7 @@ function LoadingScreen({ label, theme = "dark" }) {
 }
 
 // ============ ENTRY CARD ============
-function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemove }) {
+function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemove, dragHandle }) {
   const last = useMemo(() => lastPerformance(workouts, entry.exercise, draftId), [workouts, entry.exercise, draftId]);
   const similar = useMemo(() => similarPerformances(workouts, registry, entry.exercise, draftId), [workouts, registry, entry.exercise, draftId]);
   const [showSimilar, setShowSimilar] = useState(true);
@@ -824,7 +882,14 @@ function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemov
   return (
     <div className="wt-card" style={{ "--plate": color }}>
       <div className="wt-card-head">
-        <span className="wt-plate" aria-hidden="true" />
+        {dragHandle ? (
+          <button className="wt-drag-handle" {...dragHandle} aria-label={`Reorder ${entry.exercise}`} title="Drag to reorder">
+            <span className="wt-plate" aria-hidden="true" />
+            <span className="wt-drag-dots" aria-hidden="true">⠿</span>
+          </button>
+        ) : (
+          <span className="wt-plate" aria-hidden="true" />
+        )}
         <div className="wt-card-titlewrap">
           <div className="wt-card-title">{entry.exercise}</div>
           <div className="wt-card-sub">{entry.muscle} · {muscleRegion(entry.muscle)}</div>
@@ -1282,6 +1347,15 @@ const CSS = `
 .wt-theme-inline{margin-top:22px;background:var(--panel);border:1px solid var(--line);color:var(--dim);font:inherit;font-size:13px;font-weight:600;padding:9px 18px;border-radius:999px;cursor:pointer}
 .wt-theme-inline:hover{border-color:var(--accent);color:var(--text)}
 .wt-header-right{display:flex;align-items:center;gap:8px}
+.wt-card-wrap{position:relative}
+.wt-card-wrap.dragging{z-index:10;position:relative}
+.wt-card-wrap.dragging .wt-card{box-shadow:0 10px 26px rgba(0,0,0,.45);border-color:var(--accent);opacity:.97}
+.wt-drag-handle{display:flex;align-items:center;gap:6px;background:none;border:0;padding:2px 2px 2px 0;cursor:grab;touch-action:none;flex:none;color:var(--dim)}
+.wt-drag-handle:active{cursor:grabbing}
+.wt-drag-dots{font-size:15px;line-height:1}
+.wt-reorder-hint{font-size:11px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);text-align:center;margin-bottom:-4px}
+.wt-prefill-note{background:var(--panel2);border-left:3px solid var(--accent);border-radius:8px;padding:9px 11px;font-size:13px;color:var(--text)}
+.wt-prefill-note.none{border-left-color:var(--line);color:var(--dim)}
 .wt-cal-people{display:flex;gap:6px;flex-wrap:wrap;margin-bottom:4px}
 .wt-cal-head{display:flex;align-items:center;justify-content:space-between;gap:8px}
 .wt-cal-nav{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;width:36px;height:36px;font-size:20px;cursor:pointer;flex:none}

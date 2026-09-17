@@ -3,7 +3,7 @@
 // but a cached shell when offline); cache-first for static assets and icons.
 // API calls to Supabase are never cached — they always hit the network.
 
-const CACHE = "ironbook-shell-v1";
+const CACHE = "ironbook-shell-v2";
 const SHELL = ["/", "/index.html", "/manifest.webmanifest", "/icon.svg", "/icon-192.png", "/icon-512.png", "/apple-touch-icon.png"];
 
 self.addEventListener("install", (event) => {
