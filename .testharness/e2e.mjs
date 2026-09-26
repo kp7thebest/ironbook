@@ -37,6 +37,9 @@ await page.waitForSelector(".wt-card", { timeout: 5000 });
 const cards = await page.locator(".wt-card").count();
 check("prefilled 3 exercises from last upper day", cards === 3, `got ${cards}`);
 check("prefill banner shown", await page.locator(".wt-prefill-note").count() === 1);
+const latCard = page.locator(".wt-card", { hasText: /lat pulldown/i }).first();
+check("everyday name 'lat pulldown' gets a demo button via alias", (await latCard.locator(".wt-demo-btn").count()) === 1);
+check("...and an equipment tag (Cable)", /cable/i.test(await latCard.locator(".wt-etag").innerText().catch(() => "")));
 
 console.log("\n3. Reorder: grip bar + arrows");
 check("grip bars rendered", await page.locator(".wt-grip").count() === 3);
@@ -76,7 +79,7 @@ const afterDiscard = await notBlank(page, "Discard");
 check("back on the start screen after discarding", /Ready to lift/i.test(afterDiscard));
 
 console.log("\n6. Tab navigation sanity");
-for (const t of ["History", "Calendar", "Friends", "Library", "Settings", "Log"]) {
+for (const t of ["History", "Progress", "Calendar", "Friends", "Library", "Settings", "Log"]) {
   await page.locator(".wt-tab", { hasText: t }).click();
   await page.waitForTimeout(400);
   const txt = await bodyText(page);
@@ -96,6 +99,112 @@ await page.locator(".wt-session-actions button", { hasText: "Save changes" }).cl
 await page.waitForTimeout(800);
 const afterSave = await notBlank(page, "Save changes");
 check("returned to History after saving edit", /sessions on record/i.test(afterSave));
+
+console.log("\n8. Progress tab: chart, tiles, interaction");
+await page.locator(".wt-tab", { hasText: "Progress" }).click();
+await page.waitForSelector(".wt-viz-svg", { timeout: 5000 });
+check("3 stat tiles", (await page.locator(".wt-kpi").count()) === 3);
+await page.selectOption(".wt-prog-ex select", "lat pulldown");
+await page.waitForTimeout(300);
+const dots = await page.locator(".wt-viz-dot").count();
+const bars = await page.locator(".wt-viz-bar").count();
+check("lat pulldown: many sessions plotted", dots >= 8, `${dots} dots`);
+check("reps columns line up with weight points", bars === dots, `${bars} bars vs ${dots} dots`);
+check("single PR label on the weight panel", (await page.locator(".wt-viz-pr").count()) === 1);
+check("no dual-axis: weight and reps are separate panels", (await page.locator(".wt-viz-title").count()) === 2);
+const dateBefore = await page.locator(".wt-readout-date").innerText();
+const vbox = await page.locator(".wt-viz-svg").boundingBox();
+await page.mouse.click(vbox.x + 60, vbox.y + vbox.height / 2);
+await page.waitForTimeout(200);
+const dateAfter = await page.locator(".wt-readout-date").innerText();
+check("tapping the chart selects another session", dateBefore !== dateAfter, `${dateBefore} -> ${dateAfter}`);
+await page.locator(".wt-viz-svg").focus();
+await page.keyboard.press("End");
+await page.waitForTimeout(150);
+check("End key returns to the latest session", (await page.locator(".wt-readout-date").innerText()) === dateBefore);
+await page.locator("button", { hasText: "Show data table" }).click();
+const trows = await page.locator(".wt-ptable tbody tr").count();
+check("data table lists every plotted session", trows === dots, `${trows} rows`);
+await page.locator(".wt-seg-btn", { hasText: "1M" }).click();
+await page.waitForTimeout(300);
+check("1M range renders", /No .* sessions in the last month|Top-set weight/i.test(await bodyText(page)));
+await page.locator(".wt-seg-btn", { hasText: "All" }).click();
+await page.selectOption(".wt-prog-ex select", "pullups");
+await page.waitForTimeout(300);
+check("bodyweight exercise: reps-only chart",
+  (await page.locator(".wt-viz-dot").count()) === 0 && (await page.locator(".wt-viz-bar").count()) > 0);
+check("pullups tagged Bodyweight", (await page.locator(".wt-prog-head .wt-etag.bodyweight").count()) === 1);
+await notBlank(page, "Progress tab");
+
+console.log("\n9. PR estimator");
+const wIn = page.locator(".wt-pre-inputs input").nth(0);
+const rIn = page.locator(".wt-pre-inputs input").nth(1);
+await wIn.fill("50");
+await rIn.fill("8");
+await page.waitForTimeout(150);
+const hero = (await page.locator(".wt-pre-hero-val").innerText()).trim();
+check("50 kg x 8 -> 62.5 kg (avg of Epley 63.3 / Brzycki 62.1)", /^62\.5/.test(hero), hero);
+check("rep-max table has 9 rows", (await page.locator(".wt-pre-table tbody tr").count()) === 9);
+check("row for 8 reps is highlighted and ~50 kg",
+  /^8\s+50(\.0)? kg/.test((await page.locator(".wt-pre-table tr.on").innerText()).replace(/\t/g, " ").trim()),
+  await page.locator(".wt-pre-table tr.on").innerText());
+await rIn.fill("15");
+await page.waitForTimeout(100);
+check("high-rep reliability warning", (await page.locator(".wt-pre-warn").count()) === 1);
+
+console.log("\n10. Picker: muscle sub-filters, equipment filter, tags, live 1RM");
+await page.locator(".wt-tab", { hasText: "Log" }).click();
+await page.waitForTimeout(300);
+await page.locator("button", { hasText: "or start empty" }).click();
+await page.waitForTimeout(300);
+await page.locator("button", { hasText: "+ Add exercise" }).click();
+await page.waitForSelector(".wt-modal");
+await page.locator(".wt-modal .wt-chip", { hasText: /^Arms$/ }).click();
+check("Arms reveals Biceps/Triceps/Forearms", (await page.locator(".wt-modal .wt-subchip").count()) === 4);
+await page.locator(".wt-modal .wt-subchip", { hasText: "Forearms" }).click();
+await page.waitForTimeout(200);
+const fm = await page.locator(".wt-modal .wt-pick-muscle").allInnerTexts();
+check("Forearms filter returns only forearm exercises", fm.length >= 10 && fm.every((m) => /forearms/i.test(m)),
+  `${fm.length} rows, e.g. ${fm.slice(0, 3)}`);
+await page.selectOption(".wt-modal .wt-equip-select select", "bodyweight");
+await page.locator(".wt-modal .wt-chip", { hasText: /^All$/ }).click();
+await page.waitForTimeout(200);
+const bw = await page.locator(".wt-modal .wt-pick-row .wt-etag").allInnerTexts();
+check("Bodyweight filter shows only Bodyweight-tagged rows", bw.length > 10 && bw.every((t) => t.trim() === "Bodyweight"), `${bw.length} tags`);
+await page.selectOption(".wt-modal .wt-equip-select select", "any");
+await page.locator(".wt-modal .wt-search").fill("bench press");
+await page.waitForTimeout(200);
+check("logged 'bench press' inherits a DB equipment tag",
+  (await page.locator(".wt-modal .wt-pick-row", { hasText: /^bench press/i }).first().locator(".wt-etag").count()) === 1);
+await page.locator(".wt-modal .wt-pick-row", { hasText: /^bench press/i }).first().click();
+await page.waitForTimeout(300);
+const inp = page.locator(".wt-card .wt-set-row input");
+await inp.nth(0).fill("100");
+await inp.nth(1).fill("5");
+await page.waitForTimeout(150);
+const live = await page.locator(".wt-e1-live").innerText();
+check("live 1RM while logging: 100 x 5 -> 114.5", /114\.5/.test(live), live);
+check("beats prior best (80 x 7) -> New PR badge", (await page.locator(".wt-e1-badge").count()) === 1);
+page.once("dialog", (d) => d.accept());
+await page.locator("button", { hasText: "Discard" }).click();
+await page.waitForTimeout(400);
+
+console.log("\n11. Library: filters + deep link to Progress");
+await page.locator(".wt-tab", { hasText: "Library" }).click();
+await page.waitForTimeout(400);
+await page.locator(".wt-chip", { hasText: /^Arms$/ }).click();
+await page.locator(".wt-subchip", { hasText: "Forearms" }).click();
+await page.waitForTimeout(200);
+const libCount = await page.locator(".wt-lib-count").innerText();
+check("Library can list all forearm exercises (>= 25)", parseInt(libCount, 10) >= 25, libCount);
+await page.locator(".wt-chip", { hasText: /^All$/ }).click();
+await page.locator(".wt-pane > .wt-search").fill("lat pulldown");
+await page.waitForTimeout(200);
+await page.locator(".wt-lib-row").first().click();
+await page.locator("button", { hasText: "View progress chart" }).click();
+await page.waitForSelector(".wt-prog-name", { timeout: 3000 });
+check("'View progress chart' opens that exercise", /lat pulldown/i.test(await page.locator(".wt-prog-name").innerText()));
+await notBlank(page, "deep link");
 
 await page.locator(".wt-tab", { hasText: "Log" }).click();
 await page.waitForTimeout(300);

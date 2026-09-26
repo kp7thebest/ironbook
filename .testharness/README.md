@@ -36,7 +36,14 @@ Exits 0 when everything passes, 1 otherwise.
 - **Discard** → returns to the start screen, screen not blank
 - every tab renders without crashing
 - editing a past session from History and saving returns to History
+- Progress tab: plotting, tap/keyboard inspection, data table, range filter, bodyweight chart
+- PR estimator math (50 kg × 8 → 62.5 kg), rep table, high-rep warning
+- muscle sub-filters (e.g. Arms → Forearms), equipment filter, Bodyweight tags
+- everyday names get demos/tags via aliases; live 1RM + New PR badge while logging
+- Library → "View progress chart" deep link
 - no unexpected console/page errors (external font/CDN failures are ignored)
+
+Also run `node .testharness/check-aliases.mjs` after editing the ALIASES table.
 
 ## Note on `chromium.launch()`
 

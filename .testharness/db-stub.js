@@ -1,5 +1,7 @@
 // In-memory stand-in for db.js so the UI can be driven end-to-end without Supabase.
 // Used only by the test build (vite.test.config.js aliases ./db.js to this file).
+// "Me" gets the real spreadsheet history (41 sessions) so progress charts have realistic data.
+import { SEED } from "../src/seed.js";
 
 const ME = "user-me";
 let profiles = [
@@ -16,6 +18,7 @@ let workouts = {
         { exercise: "lateral raise", muscle: "shoulders", sets: [{ weight: 25, reps: "8,8" }] },
       ],
     },
+    ...SEED.map((w, i) => ({ id: "seed" + i, date: w.date, name: w.name, entries: w.entries })),
   ],
   "user-friend": [],
 };

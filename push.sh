@@ -18,7 +18,16 @@ REMOTE=$(git remote get-url origin 2>/dev/null || echo "none")
 echo "→ Repo remote: $REMOTE"
 
 # Show what's about to be committed.
-if git diff --quiet && git diff --cached --quiet && [ -z "$(git status --porcelain)" ]; then
+# If nothing to commit, still check for unpushed commits before bailing out.
+if [ -z "$(git status --porcelain)" ]; then
+  UNPUSHED=$(git log @{u}..HEAD --oneline 2>/dev/null | wc -l | tr -d ' ')
+  if [ "$UNPUSHED" != "0" ]; then
+    echo "→ Nothing new to commit, but $UNPUSHED commit(s) not yet pushed. Pushing…"
+    git push
+    echo ""
+    echo "✅ Pushed. Vercel will build and deploy automatically in ~1 minute."
+    exit 0
+  fi
   echo "✓ Nothing to commit — everything is already up to date."
   exit 0
 fi

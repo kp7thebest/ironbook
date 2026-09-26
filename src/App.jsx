@@ -57,6 +57,129 @@ const setLine = (s, unit) => {
   return `${w}×${s.reps || "–"}`;
 };
 
+// ============ EQUIPMENT ============
+// Groups used by the filter; each exercise's tag shows its specific equipment.
+const EQUIP_KINDS = [
+  ["bodyweight", "Bodyweight"], ["free", "Free weights"], ["machine", "Machine"],
+  ["cable", "Cable"], ["bands", "Bands"], ["other", "Other equipment"],
+];
+// Returns null when unknown (e.g. an exercise only seen in your history with no DB match).
+function equipKind(meta) {
+  const e = ((meta && meta.equipment) || "").toLowerCase().trim();
+  const n = ((meta && meta.name) || "").toLowerCase();
+  if (!e) return null;
+  if (/(body only|bodyweight|body weight|^none$|no equipment)/.test(e) || (e === "other" && /bodyweight/.test(n))) return "bodyweight";
+  if (/(dumbbell|barbell|kettlebell|e-z|ez bar|ez curl)/.test(e)) return "free";
+  if (/(machine|smith)/.test(e)) return "machine";
+  if (/(cable|rope)/.test(e)) return "cable";
+  if (/band/.test(e)) return "bands";
+  return "other";
+}
+const capFirst = (s) => (s ? s[0].toUpperCase() + s.slice(1) : s);
+function equipLabel(meta) {
+  const k = equipKind(meta);
+  if (!k) return null;
+  if (k === "bodyweight") return "Bodyweight";
+  if (k === "other" && (meta.equipment || "").toLowerCase() === "other") return "Other equipment";
+  const e = (meta.equipment || "").toLowerCase();
+  if (e === "e-z curl bar") return "EZ bar";
+  if (e === "kettlebells") return "Kettlebell";
+  return capFirst(meta.equipment);
+}
+function EquipTag({ meta }) {
+  const k = equipKind(meta);
+  if (!k) return null;
+  return (
+    <span className={"wt-etag " + k} title={k === "bodyweight" ? "No external weight needed" : "Needs: " + equipLabel(meta)}>
+      {equipLabel(meta)}
+    </span>
+  );
+}
+
+// ============ EXERCISE FILTERS (muscle group → specific muscle → equipment) ============
+const REGIONS = ["All", "Chest", "Back", "Shoulders", "Arms", "Legs", "Core", "Other"];
+const REGION_MUSCLES = REGIONS.reduce((acc, r) => {
+  acc[r] = Object.keys(MUSCLE_META).filter((m) => m !== "other" && MUSCLE_META[m][0] === r);
+  return acc;
+}, {});
+const EMPTY_FILTER = { region: "All", muscle: null, equip: "any" };
+const matchFilter = (m, f) =>
+  (f.region === "All" || muscleRegion(m.muscle) === f.region) &&
+  (!f.muscle || m.muscle === f.muscle) &&
+  (f.equip === "any" || equipKind(m) === f.equip);
+const filterActive = (f) => f.region !== "All" || f.muscle || f.equip !== "any";
+
+function ExerciseFilters({ f, setF, small }) {
+  const subs = f.region !== "All" ? REGION_MUSCLES[f.region] || [] : [];
+  const chip = "wt-chip" + (small ? " sm" : "");
+  return (
+    <div className="wt-filters">
+      <div className="wt-regions" role="group" aria-label="Muscle group">
+        {REGIONS.map((r) => (
+          <button key={r} className={chip + (f.region === r ? " on" : "")} aria-pressed={f.region === r}
+            onClick={() => setF({ ...f, region: r, muscle: null })}>{r}</button>
+        ))}
+      </div>
+      {subs.length > 1 && (
+        <div className="wt-subchips" role="group" aria-label={`${f.region} muscles`}>
+          <button className={"wt-subchip" + (!f.muscle ? " on" : "")} aria-pressed={!f.muscle}
+            onClick={() => setF({ ...f, muscle: null })}>All {f.region.toLowerCase()}</button>
+          {subs.map((m) => (
+            <button key={m} className={"wt-subchip" + (f.muscle === m ? " on" : "")} aria-pressed={f.muscle === m}
+              onClick={() => setF({ ...f, muscle: m })}>{capFirst(m)}</button>
+          ))}
+        </div>
+      )}
+      <label className="wt-equip-select">
+        <span>Equipment</span>
+        <select value={f.equip} onChange={(e) => setF({ ...f, equip: e.target.value })}>
+          <option value="any">Any</option>
+          {EQUIP_KINDS.map(([k, label]) => <option key={k} value={k}>{k === "bodyweight" ? "Bodyweight (no weights)" : label}</option>)}
+        </select>
+      </label>
+    </div>
+  );
+}
+
+// ============ STRENGTH MATH (1-rep max estimation) ============
+// Reps may be unilateral ("6,6" = 6 each side) -> use the average of the parts.
+const repsValue = (r) => {
+  if (r == null || r === "") return null;
+  const parts = String(r).split(",").map((x) => parseFloat(x)).filter((x) => !isNaN(x) && x > 0);
+  if (!parts.length) return null;
+  return parts.reduce((a, b) => a + b, 0) / parts.length;
+};
+// Average of Epley and Brzycki: the two most widely used formulas; they agree closely under ~10 reps.
+function est1RM(w, r) {
+  if (w == null || r == null || !(w > 0) || !(r > 0)) return null;
+  if (r <= 1) return w;
+  const epley = w * (1 + r / 30);
+  const brzycki = r < 37 ? (w * 36) / (37 - r) : epley;
+  return (epley + brzycki) / 2;
+}
+// Inverse: the weight you should manage for `r` reps given a 1RM.
+function weightForReps(oneRM, r) {
+  if (!(oneRM > 0)) return null;
+  if (r <= 1) return oneRM;
+  return (oneRM / (1 + r / 30) + (oneRM * (37 - r)) / 36) / 2;
+}
+// Best (highest) estimated 1RM across a list of sets.
+function bestE1(sets) {
+  let best = null;
+  for (const s of sets || []) {
+    const e = est1RM(s.weight != null ? Number(s.weight) : null, repsValue(s.reps));
+    if (e != null && (!best || e > best.e1)) best = { e1: e, weight: Number(s.weight), reps: s.reps };
+  }
+  return best;
+}
+const roundTo = (v, step) => Math.round(v / step) * step;
+// A kg weight shown in the user's unit, rounded to a loadable increment (0.5 kg / 1 lb).
+const fmtLoad = (kg, unit) => {
+  if (kg == null) return "–";
+  const v = unit === "lbs" ? kg / KG_PER_LB : kg;
+  return String(roundTo(v, unit === "lbs" ? 1 : 0.5));
+};
+
 // localStorage JSON helpers (fine outside Claude artifacts)
 const lsGet = (k, fallback) => {
   try { const v = localStorage.getItem(k); return v ? JSON.parse(v) : fallback; } catch { return fallback; }
@@ -65,6 +188,47 @@ const lsSet = (k, v) => { try { localStorage.setItem(k, JSON.stringify(v)); } ca
 const lsDel = (k) => { try { localStorage.removeItem(k); } catch { /* ignore */ } };
 
 // ============ EXERCISE REGISTRY ============
+const DB_INDEX = new Map(EXDB.map((t) => [norm(t[0]), t]));
+// Everyday gym names -> the closest exercise-database entry. Logged/custom exercises with these
+// names borrow that entry's equipment (for tags/filters) and demo images. Nothing is renamed.
+// Every target is checked to exist by the test harness.
+const ALIASES = {
+  "bench press": "Barbell Bench Press - Medium Grip", "barbell bench press": "Barbell Bench Press - Medium Grip",
+  "incline bench press": "Barbell Incline Bench Press - Medium Grip",
+  "squat": "Barbell Full Squat", "squats": "Barbell Full Squat", "back squat": "Barbell Full Squat",
+  "deadlift": "Barbell Deadlift", "deadlifts": "Barbell Deadlift", "rdl": "Romanian Deadlift",
+  "hip thrust": "Barbell Hip Thrust", "hip thrusts": "Barbell Hip Thrust",
+  "lat pulldown": "Wide-Grip Lat Pulldown", "lat pulldowns": "Wide-Grip Lat Pulldown", "lat pull down": "Wide-Grip Lat Pulldown",
+  "leg extension": "Leg Extensions", "leg curl": "Seated Leg Curl", "leg curls": "Seated Leg Curl",
+  "calf raise": "Standing Calf Raises", "calf raises": "Standing Calf Raises",
+  "adductor": "Thigh Adductor", "abductor": "Thigh Abductor",
+  "lateral raise": "Side Lateral Raise", "lateral raises": "Side Lateral Raise", "lat raise": "Side Lateral Raise",
+  "shoulder press": "Dumbbell Shoulder Press", "overhead press": "Barbell Shoulder Press",
+  "machine shoulder press": "Machine Shoulder (Military) Press",
+  "chest press": "Leverage Chest Press", "machine chest press": "Leverage Chest Press",
+  "incline chest press": "Leverage Incline Chest Press", "chest fly": "Butterfly", "pec deck": "Butterfly",
+  "dumbbell fly": "Dumbbell Flyes", "cable fly": "Cable Crossover",
+  "seated row": "Seated Cable Rows", "seated rows": "Seated Cable Rows", "cable row": "Seated Cable Rows",
+  "close grip row": "Seated Cable Rows", "barbell row": "Bent Over Barbell Row", "dumbbell row": "One-Arm Dumbbell Row",
+  "t-bar row": "T-Bar Row with Handle", "t-bar row wide": "T-Bar Row with Handle",
+  "back extension": "Hyperextensions (Back Extensions)", "back extensions": "Hyperextensions (Back Extensions)",
+  "tricep pushdown": "Triceps Pushdown", "triceps pushdown": "Triceps Pushdown",
+  "tricep pushdown single arm": "Cable One Arm Tricep Extension",
+  "overhead tricep": "Cable Rope Overhead Triceps Extension", "overhead tricep extension": "Cable Rope Overhead Triceps Extension",
+  "dips": "Dips - Triceps Version",
+  "bicep curl": "Dumbbell Bicep Curl", "biceps curl": "Dumbbell Bicep Curl", "hammer curl": "Hammer Curls",
+  "preacher curl": "Preacher Curl", "concentration curl": "Concentration Curls", "reverse curl": "Reverse Barbell Curl",
+  "cable curl": "Standing Biceps Cable Curl", "bayesian curl": "Standing One-Arm Cable Curl",
+  "abs": "Ab Crunch Machine", "ab crunch": "Ab Crunch Machine", "crunch": "Crunches",
+  "pull ups": "Pullups", "pull-ups": "Pullups", "pullup": "Pullups", "chin ups": "Chin-Up", "chin-ups": "Chin-Up",
+  "push ups": "Pushups", "push-ups": "Pushups", "pushup": "Pushups", "lunges": "Dumbbell Lunges",
+};
+// Resolve a logged/custom name to a DB entry: exact alias, else singular/plural variant.
+function dbMatch(k) {
+  if (ALIASES[k]) return DB_INDEX.get(norm(ALIASES[k])) || null;
+  return DB_INDEX.get(k + "s") || (k.endsWith("s") ? DB_INDEX.get(k.slice(0, -1)) : null) || null;
+}
+
 function buildRegistry(customExercises, workouts) {
   const map = new Map();
   for (const w of workouts) for (const e of w.entries) {
@@ -76,8 +240,23 @@ function buildRegistry(customExercises, workouts) {
   }
   for (const [name, muscle, equipment, img] of EXDB) {
     const k = norm(name);
-    if (!map.has(k)) map.set(k, { name, muscle, equipment, img: img || "", source: "db" });
-    else if (img && !map.get(k).img) map.get(k).img = img;
+    // In the source DB, blank equipment means none is needed (push-ups, lunges, stretches).
+    const eq = equipment || "body only";
+    if (!map.has(k)) map.set(k, { name, muscle, equipment: eq, img: img || "", source: "db" });
+    else {
+      // A logged/custom exercise that matches a DB entry inherits its demo images and equipment.
+      const cur = map.get(k);
+      if (img && !cur.img) cur.img = img;
+      if (!cur.equipment) cur.equipment = eq;
+    }
+  }
+  // Everyday names ("bench press") -> borrow equipment + demo from the closest DB entry.
+  for (const [k, cur] of map) {
+    if (cur.source === "db" || (cur.img && cur.equipment)) continue;
+    const t = dbMatch(k);
+    if (!t) continue;
+    if (!cur.img && t[3]) cur.img = t[3];
+    if (!cur.equipment) cur.equipment = t[2] || "body only";
   }
   return map;
 }
@@ -308,6 +487,7 @@ function MainApp({ session, theme, onToggleTheme }) {
   const [custom, setCustom] = useState([]);
   const [draft, setDraft] = useState(() => lsGet(draftKey(myId), null));
   const [editing, setEditing] = useState(null); // a saved workout being edited (full object incl. id)
+  const [progressKey, setProgressKey] = useState(null); // exercise shown on the Progress tab
   const [tab, setTab] = useState("log");
   const [toast, setToast] = useState(null);
   const [loadErr, setLoadErr] = useState("");
@@ -446,7 +626,7 @@ function MainApp({ session, theme, onToggleTheme }) {
       </header>
 
       <nav className="wt-tabs">
-        {[["log", "Log"], ["history", "History"], ["calendar", "Calendar"], ["friends", "Friends"], ["exercises", "Library"], ["settings", "Settings"]].map(([id, label]) => (
+        {[["log", "Log"], ["history", "History"], ["progress", "Progress"], ["calendar", "Calendar"], ["friends", "Friends"], ["exercises", "Library"], ["settings", "Settings"]].map(([id, label]) => (
           <button key={id} className={"wt-tab" + (tab === id ? " on" : "")} onClick={() => setTab(id)}>{label}</button>
         ))}
       </nav>
@@ -461,10 +641,14 @@ function MainApp({ session, theme, onToggleTheme }) {
           onDelete={removeWorkout} onEdit={(w) => { setEditing(w); setTab("log"); }} />
       )}
       {tab === "friends" && <FriendsView myId={myId} unit={unit} theme={theme} />}
+      {tab === "progress" && (
+        <ProgressView workouts={workouts} unit={unit} registry={registry} exKey={progressKey} setExKey={setProgressKey} />
+      )}
       {tab === "calendar" && <CalendarView myId={myId} myName={profile.display_name} myWorkouts={workouts} />}
       {tab === "exercises" && (
         <ExercisesView registry={registry} workouts={workouts} unit={unit} flash={flash}
-          myId={myId} onAddCustom={addCustom} onEditCustom={editCustom} onDeleteCustom={removeCustom} />
+          myId={myId} onAddCustom={addCustom} onEditCustom={editCustom} onDeleteCustom={removeCustom}
+          onShowProgress={(name) => { setProgressKey(norm(name)); setTab("progress"); }} />
       )}
       {tab === "settings" && (
         <SettingsView flash={flash} hasWorkouts={workouts.length > 0} onImportSeed={importSeed}
@@ -484,6 +668,486 @@ async function flushQueue(myId, setWorkouts) {
     try { await insertWorkout(myId, w); } catch { remaining.push(w); }
   }
   remaining.length ? lsSet(queueKey(myId), remaining) : lsDel(queueKey(myId));
+}
+
+// ============ PROGRESS ============
+// One point per session date for an exercise. "Top set" = the heaviest set that day (ties -> more reps);
+// bodyweight exercises (no load logged) use the set with the most reps instead.
+function exerciseSeries(workouts, key) {
+  const byDate = new Map();
+  for (const w of workouts) {
+    for (const e of w.entries || []) {
+      if (norm(e.exercise) !== key) continue;
+      const sets = (e.sets || [])
+        .map((s) => ({ weight: s.weight != null && s.weight !== "" ? Number(s.weight) : null, reps: s.reps || "", rv: repsValue(s.reps) }))
+        .filter((s) => s.weight != null || s.rv != null);
+      if (!sets.length) continue;
+      const pool = sets.some((s) => s.weight != null) ? sets.filter((s) => s.weight != null) : sets;
+      const top = pool.slice().sort((a, b) => (b.weight ?? 0) - (a.weight ?? 0) || (b.rv ?? 0) - (a.rv ?? 0))[0];
+      const best = bestE1(sets);
+      const pt = { date: w.date, name: w.name, sets, top, e1: best ? best.e1 : null, e1Set: best };
+      const prev = byDate.get(w.date);
+      const stronger = !prev || (top.weight ?? 0) > (prev.top.weight ?? 0) ||
+        ((top.weight ?? 0) === (prev.top.weight ?? 0) && (top.rv ?? 0) > (prev.top.rv ?? 0));
+      if (stronger) byDate.set(w.date, pt);
+    }
+  }
+  return [...byDate.values()].sort((a, b) => a.date.localeCompare(b.date));
+}
+
+// Clean axis ticks (1, 2, 5 x 10^n steps) covering [min, max].
+function niceTicks(min, max, count) {
+  if (!isFinite(min) || !isFinite(max)) return { lo: 0, hi: 1, ticks: [0, 1] };
+  if (min === max) { const pad = Math.max(1, Math.abs(min) * 0.1); min -= pad; max += pad; }
+  const raw = (max - min) / count;
+  const mag = Math.pow(10, Math.floor(Math.log10(raw)));
+  const r = raw / mag;
+  const step = (r >= 7.5 ? 10 : r >= 3.5 ? 5 : r >= 1.5 ? 2 : 1) * mag;
+  const lo = Math.floor(min / step) * step;
+  const hi = Math.ceil(max / step) * step;
+  const ticks = [];
+  for (let v = lo; v <= hi + step / 2; v += step) ticks.push(Math.round(v * 1000) / 1000);
+  return { lo, hi, ticks };
+}
+const shortDate = (d) => new Date(d + "T00:00:00").toLocaleDateString(undefined, { month: "short", day: "numeric" });
+const fmtNum = (v) => (v == null ? "–" : String(Number.isInteger(v) ? v : Math.round(v * 10) / 10));
+const toDisp = (kg, unit) => (kg == null ? null : unit === "lbs" ? kg / KG_PER_LB : kg);
+
+// Two panels, one shared date axis: weight on top (line), reps below (columns).
+// Deliberately NOT a single dual-y-axis plot — two scales on one plot make the
+// crossing points and relative slopes an artifact of how the axes happen to be scaled.
+function ProgressChart({ points, unit, weighted, selIdx, onSelect, prIdx, exName }) {
+  const wrapRef = useRef(null);
+  const svgRef = useRef(null);
+  const [W, setW] = useState(340);
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return undefined;
+    const update = () => { const w = Math.round(el.getBoundingClientRect().width); if (w > 0) setW(Math.max(260, w)); };
+    update();
+    if (typeof ResizeObserver === "undefined") {
+      window.addEventListener("resize", update);
+      return () => window.removeEventListener("resize", update);
+    }
+    const ro = new ResizeObserver(update);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  const n = points.length;
+  const padL = 36, padR = 42;
+  const plotW = Math.max(40, W - padL - padR);
+  const band = plotW / Math.max(n, 1);
+  const xOf = (i) => padL + band * (i + 0.5);
+
+  // vertical layout (the x-axis label band is inside H, so nothing gets clipped)
+  const wTop = 30, wH = weighted ? 132 : 0, wBot = wTop + wH;
+  const rLabelY = weighted ? wBot + 32 : 16;
+  const rTop = weighted ? wBot + 44 : wTop, rH = weighted ? 78 : 140, rBot = rTop + rH;
+  const H = rBot + 28;
+
+  const wVals = points.map((p) => toDisp(p.top.weight, unit));
+  const wFinite = wVals.filter((v) => v != null);
+  const wMin = wFinite.length ? Math.min(...wFinite) : 0;
+  const wMax = wFinite.length ? Math.max(...wFinite) : 1;
+  const wSpan = Math.max(wMax - wMin, 1);
+  const wt = niceTicks(wMin - wSpan * 0.08, wMax + wSpan * 0.2, 4); // headroom keeps the PR label inside the panel
+  const yW = (v) => wBot - ((v - wt.lo) / (wt.hi - wt.lo)) * wH;
+
+  const rVals = points.map((p) => p.top.rv);
+  const rMax = Math.max(1, ...rVals.filter((v) => v != null));
+  const rt = niceTicks(0, rMax * 1.08, 3);
+  const yR = (v) => rBot - (v / rt.hi) * rH;
+
+  // weight line, broken where a session has no load
+  const segs = [];
+  let cur = [];
+  wVals.forEach((v, i) => {
+    if (v == null) { if (cur.length) segs.push(cur); cur = []; } else cur.push([xOf(i), yW(v)]);
+  });
+  if (cur.length) segs.push(cur);
+  const pts = (s) => s.map(([x, y]) => `${x.toFixed(1)},${y.toFixed(1)}`).join(" L");
+  const linePath = segs.map((s) => "M" + pts(s)).join(" ");
+  const areaPath = segs.filter((s) => s.length > 1)
+    .map((s) => `M${s[0][0].toFixed(1)},${wBot} L${pts(s)} L${s[s.length - 1][0].toFixed(1)},${wBot} Z`).join(" ");
+  let lastW = -1;
+  wVals.forEach((v, i) => { if (v != null) lastW = i; });
+
+  const bw = Math.max(3, Math.min(24, band * 0.58));
+  const barPath = (x, y, w, h) => {
+    const r = Math.min(4, w / 2, h);
+    return `M${x},${y + h} V${y + r} Q${x},${y} ${x + r},${y} H${x + w - r} Q${x + w},${y} ${x + w},${y + r} V${y + h} Z`;
+  };
+
+  // date labels: as many as fit without crowding, always including the latest
+  const maxLabels = Math.max(2, Math.floor(plotW / 62));
+  const step = Math.max(1, Math.ceil(n / maxLabels));
+  const xIdx = [];
+  for (let i = 0; i < n; i += step) xIdx.push(i);
+  if (n > 1 && xIdx[xIdx.length - 1] !== n - 1) {
+    if (xIdx.length > 1 && (n - 1) - xIdx[xIdx.length - 1] < step * 0.6) xIdx.pop();
+    xIdx.push(n - 1);
+  }
+
+  const pick = (e) => {
+    const svg = svgRef.current;
+    if (!svg || !n) return;
+    const rect = svg.getBoundingClientRect();
+    const px = ((e.clientX - rect.left) / rect.width) * W;
+    const i = Math.max(0, Math.min(n - 1, Math.floor((px - padL) / band)));
+    if (i !== selIdx) onSelect(i);
+  };
+  const onKey = (e) => {
+    const moves = { ArrowLeft: selIdx - 1, ArrowRight: selIdx + 1, Home: 0, End: n - 1 };
+    if (e.key in moves) { e.preventDefault(); onSelect(Math.max(0, Math.min(n - 1, moves[e.key]))); }
+  };
+
+  const xs = selIdx != null ? xOf(selIdx) : null;
+  return (
+    <div ref={wrapRef} className="wt-viz">
+      <svg ref={svgRef} width="100%" height={H} viewBox={`0 0 ${W} ${H}`} className="wt-viz-svg"
+        tabIndex={0} role="group" onPointerMove={pick} onPointerDown={pick} onKeyDown={onKey}
+        aria-label={`${exName} progress, ${n} session${n === 1 ? "" : "s"}. Left and right arrow keys move between sessions.`}>
+        <defs>
+          <linearGradient id="wtWeightWash" x1="0" y1="0" x2="0" y2="1">
+            <stop offset="0%" className="wt-viz-wash-top" />
+            <stop offset="100%" className="wt-viz-wash-bot" />
+          </linearGradient>
+        </defs>
+
+        {/* panel titles, each keyed with its series' line mark */}
+        {weighted && (<>
+          <line x1="0" x2="12" y1="11" y2="11" className="wt-viz-key w" />
+          <text x="18" y="15" className="wt-viz-title">Top-set weight ({unit})</text>
+        </>)}
+        <rect x="0" y={rLabelY - 9} width="12" height="8" rx="2" className="wt-viz-key-bar" />
+        <text x="18" y={rLabelY} className="wt-viz-title">{weighted ? "Reps in that set" : "Reps (best set)"}</text>
+
+        {/* gridlines + ticks */}
+        {weighted && wt.ticks.map((t) => (
+          <g key={"w" + t}>
+            <line x1={padL} x2={W - padR + 8} y1={yW(t)} y2={yW(t)} className="wt-viz-grid" />
+            <text x={padL - 6} y={yW(t) + 3.5} textAnchor="end" className="wt-viz-tick">{fmtNum(t)}</text>
+          </g>
+        ))}
+        {rt.ticks.map((t) => (
+          <g key={"r" + t}>
+            <line x1={padL} x2={W - padR + 8} y1={yR(t)} y2={yR(t)} className={t === 0 ? "wt-viz-base" : "wt-viz-grid"} />
+            <text x={padL - 6} y={yR(t) + 3.5} textAnchor="end" className="wt-viz-tick">{fmtNum(t)}</text>
+          </g>
+        ))}
+
+        {/* linked crosshair across both panels */}
+        {xs != null && <line x1={xs} x2={xs} y1={(weighted ? wTop : rTop) - 6} y2={rBot} className="wt-viz-cross" />}
+
+        {/* weight: wash, line, dots */}
+        {weighted && (<>
+          {areaPath && <path d={areaPath} fill="url(#wtWeightWash)" stroke="none" />}
+          {linePath && <path d={linePath} className="wt-viz-line" />}
+          {wVals.map((v, i) => v == null ? null : (
+            <circle key={"d" + i} cx={xOf(i)} cy={yW(v)} r={i === selIdx ? 6 : 4} className="wt-viz-dot" />
+          ))}
+          {lastW >= 0 && (
+            <text x={xOf(lastW) + 9} y={yW(wVals[lastW]) + 4} className="wt-viz-end">{fmtNum(wVals[lastW])}</text>
+          )}
+          {prIdx != null && wVals[prIdx] != null && (
+            <text x={xOf(prIdx)} y={yW(wVals[prIdx]) - 11} textAnchor="middle" className="wt-viz-pr">PR</text>
+          )}
+        </>)}
+
+        {/* reps: columns from the zero baseline */}
+        {rVals.map((v, i) => v == null ? null : (
+          <path key={"b" + i} d={barPath(xOf(i) - bw / 2, yR(v), bw, rBot - yR(v))}
+            className={"wt-viz-bar" + (i === selIdx ? " sel" : "")} />
+        ))}
+
+        {/* shared date axis */}
+        {xIdx.map((i) => (
+          <text key={"x" + i} x={xOf(i)} y={rBot + 18} textAnchor="middle" className="wt-viz-tick">{shortDate(points[i].date)}</text>
+        ))}
+      </svg>
+    </div>
+  );
+}
+
+// Delta on its own line, "since <date>" beneath — keeps narrow tiles from wrapping mid-phrase.
+// Direction is carried by ▲/▼ + text, never by color alone.
+function KpiDelta({ v, suffix, vs, step = 0.1 }) {
+  if (v == null) return <div className="wt-kpi-sub">{vs}</div>;
+  const r = Math.round(roundTo(v, step) * 10) / 10;
+  const cls = Math.abs(r) < 0.05 ? "flat" : r > 0 ? "up" : "down";
+  return (
+    <div className="wt-kpi-sub stack">
+      <span className={"wt-kpi-delta " + cls}>{cls === "flat" ? "± 0" : `${r > 0 ? "▲" : "▼"} ${Math.abs(r)}${suffix}`}</span>
+      <span>{vs}</span>
+    </div>
+  );
+}
+
+// ============ PR ESTIMATOR ============
+const REP_TABLE = [1, 2, 3, 4, 5, 6, 8, 10, 12];
+function PREstimator({ unit, suggestion, exName }) {
+  const [w, setW] = useState("");
+  const [r, setR] = useState("");
+  const sugKey = suggestion ? `${exName}|${suggestion.weight}|${suggestion.reps}|${unit}` : `${exName}|none|${unit}`;
+  useEffect(() => {
+    if (suggestion) {
+      setW(String(kgToDisplay(suggestion.weight, unit)));
+      setR(String(Math.round(repsValue(suggestion.reps) || 0) || ""));
+    } else { setW(""); setR(""); }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [sugKey]);
+
+  const wKg = displayToKg(w.replace(",", "."), unit);
+  const rv = parseInt(r, 10);
+  const oneRM = est1RM(wKg, rv);
+  const epley = oneRM && rv > 1 ? wKg * (1 + rv / 30) : oneRM;
+  const brzycki = oneRM && rv > 1 && rv < 37 ? (wKg * 36) / (37 - rv) : oneRM;
+
+  return (
+    <div className="wt-settings-block wt-pre" id="pr-estimator">
+      <div className="wt-settings-title">PR estimator</div>
+      <p className="wt-hint wt-pre-lede">Estimate your 1-rep max from a set you’ve done — no need to actually max out.</p>
+      <div className="wt-pre-inputs">
+        <label>Weight ({unit})
+          <input inputMode="decimal" value={w} placeholder="e.g. 50" onChange={(e) => setW(e.target.value.replace(/[^0-9.,]/g, ""))} aria-label="Weight lifted" />
+        </label>
+        <span className="wt-pre-x" aria-hidden="true">×</span>
+        <label>Reps
+          <input inputMode="numeric" value={r} placeholder="e.g. 8" onChange={(e) => setR(e.target.value.replace(/[^0-9]/g, ""))} aria-label="Reps completed" />
+        </label>
+      </div>
+
+      {oneRM ? (<>
+        <div className="wt-pre-hero">
+          <span className="wt-pre-hero-label">Estimated 1-rep max</span>
+          <span className="wt-pre-hero-val">{fmtLoad(oneRM, unit)}<em> {unit}</em></span>
+          {rv > 1 && <span className="wt-pre-range">Epley {fmtLoad(epley, unit)} · Brzycki {fmtLoad(brzycki, unit)}</span>}
+        </div>
+        {rv > 10 && <div className="wt-pre-warn">⚠ Estimates get less reliable above ~10 reps. A heavier set of 3–8 reps gives a better prediction.</div>}
+        <table className="wt-pre-table">
+          <caption>What you should be able to lift for other rep counts</caption>
+          <thead><tr><th scope="col">Reps</th><th scope="col">Weight</th><th scope="col">% of 1RM</th></tr></thead>
+          <tbody>
+            {REP_TABLE.map((k) => {
+              const wk = weightForReps(oneRM, k);
+              return (
+                <tr key={k} className={k === rv ? "on" : ""}>
+                  <td>{k}</td><td>{fmtLoad(wk, unit)} {unit}</td><td>{Math.round((wk / oneRM) * 100)}%</td>
+                </tr>
+              );
+            })}
+          </tbody>
+        </table>
+      </>) : (
+        <div className="wt-hint">Enter a weight and the reps you managed to see your estimate.</div>
+      )}
+
+      {suggestion && (
+        <div className="wt-hint wt-pre-src">
+          Pre-filled with your strongest {exName} set: {kgToDisplay(suggestion.weight, unit)} {unit} × {suggestion.reps} on {shortDate(suggestion.date)}.
+        </div>
+      )}
+      <details className="wt-pre-how">
+        <summary>How is this calculated?</summary>
+        <p>It averages two standard formulas — Epley, weight × (1 + reps ÷ 30), and Brzycki, weight × 36 ÷ (37 − reps).
+          They agree closely between 1 and 10 reps. Treat the result as a guide, not a guarantee, and test real maxes with a spotter.</p>
+      </details>
+    </div>
+  );
+}
+
+const RANGES = [["all", "All"], ["90", "3M"], ["30", "1M"]];
+function ProgressView({ workouts, unit, registry, exKey, setExKey }) {
+  // All hooks first — this component has early returns below.
+  const [range, setRange] = useState("all");
+  const [sel, setSel] = useState(null);
+  const [showTable, setShowTable] = useState(false);
+
+  const exercises = useMemo(() => {
+    const m = new Map();
+    for (const w of workouts) {
+      for (const e of w.entries || []) {
+        if (!(e.sets || []).some((s) => s.weight != null || s.reps)) continue;
+        const k = norm(e.exercise);
+        const cur = m.get(k) || { key: k, name: e.exercise, count: 0, last: "" };
+        cur.count += 1;
+        if (w.date >= cur.last) { cur.last = w.date; cur.name = e.exercise; }
+        m.set(k, cur);
+      }
+    }
+    return [...m.values()].sort((a, b) => b.count - a.count || b.last.localeCompare(a.last));
+  }, [workouts]);
+
+  const activeKey = exKey && exercises.some((x) => x.key === exKey) ? exKey : (exercises[0] ? exercises[0].key : null);
+  const allPoints = useMemo(() => (activeKey ? exerciseSeries(workouts, activeKey) : []), [workouts, activeKey]);
+  const points = useMemo(() => {
+    if (range === "all") return allPoints;
+    const cutoff = new Date(Date.now() - Number(range) * 86400000).toISOString().slice(0, 10);
+    return allPoints.filter((p) => p.date >= cutoff);
+  }, [allPoints, range]);
+  useEffect(() => { setSel(null); }, [activeKey, range]);
+
+  if (!exercises.length) {
+    return (
+      <div className="wt-pane">
+        <div className="wt-empty">
+          <div className="wt-empty-big">No progress yet</div>
+          <p>Log a workout and your progress charts will appear here, one per exercise.</p>
+        </div>
+        <PREstimator unit={unit} suggestion={null} exName="" />
+      </div>
+    );
+  }
+
+  const exInfo = exercises.find((x) => x.key === activeKey);
+  const exName = capFirst(exInfo ? exInfo.name : "");
+  const meta = (registry && registry.get(activeKey)) || { name: exName, muscle: "other", equipment: "" };
+  const n = points.length;
+  const selIdx = n ? (sel == null ? n - 1 : Math.max(0, Math.min(sel, n - 1))) : null;
+  const weighted = points.some((p) => p.top.weight != null);
+
+  // Personal best in view: heaviest top set (ties -> more reps, then the later one); reps for bodyweight.
+  let prIdx = null;
+  points.forEach((p, i) => {
+    if (prIdx == null) { prIdx = i; return; }
+    const b = points[prIdx];
+    const better = weighted
+      ? (p.top.weight ?? -1) > (b.top.weight ?? -1) || ((p.top.weight ?? -1) === (b.top.weight ?? -1) && (p.top.rv ?? 0) >= (b.top.rv ?? 0))
+      : (p.top.rv ?? 0) >= (b.top.rv ?? 0);
+    if (better) prIdx = i;
+  });
+
+  // strongest set on record (all time) seeds the PR estimator
+  let bestSet = null;
+  for (const p of allPoints) if (p.e1Set && (!bestSet || p.e1Set.e1 > bestSet.e1)) bestSet = { ...p.e1Set, date: p.date };
+
+  const first = points[0], last = points[n - 1], best = prIdx != null ? points[prIdx] : null;
+  const since = first ? `since ${shortDate(first.date)}` : "";
+  const p = selIdx != null ? points[selIdx] : null;
+  const rangeLabel = (RANGES.find(([k]) => k === range) || [])[1];
+
+  return (
+    <div className="wt-pane">
+      <div className="wt-prog-filters">
+        <label className="wt-prog-ex">
+          <span className="wt-prog-ex-label">Exercise</span>
+          <select value={activeKey || ""} onChange={(e) => setExKey(e.target.value)}>
+            {exercises.map((x) => <option key={x.key} value={x.key}>{capFirst(x.name)} ({x.count})</option>)}
+          </select>
+        </label>
+        <div className="wt-seg" role="group" aria-label="Time range">
+          {RANGES.map(([k, label]) => (
+            <button key={k} className={"wt-seg-btn" + (range === k ? " on" : "")} aria-pressed={range === k} onClick={() => setRange(k)}>{label}</button>
+          ))}
+        </div>
+      </div>
+
+      <div className="wt-prog-head" style={{ "--plate": muscleColor(meta.muscle) }}>
+        <span className="wt-plate" aria-hidden="true" />
+        <div className="wt-prog-name">{exName}</div>
+        <EquipTag meta={meta} />
+      </div>
+
+      {n === 0 ? (
+        <div className="wt-empty small">
+          <p>No {exName} sessions in the last {rangeLabel === "3M" ? "3 months" : "month"}.</p>
+          <button className="wt-ghost" onClick={() => setRange("all")}>Show all time</button>
+        </div>
+      ) : (<>
+        <div className="wt-kpis">
+          {weighted ? (<>
+            <div className="wt-kpi">
+              <div className="wt-kpi-label">Latest</div>
+              <div className="wt-kpi-val">{fmtNum(toDisp(last.top.weight, unit))}<small> {unit}</small><span className="wt-kpi-x"> × {last.top.reps || "–"}</span></div>
+              {n > 1 ? <KpiDelta v={(toDisp(last.top.weight, unit) ?? 0) - (toDisp(first.top.weight, unit) ?? 0)} suffix={` ${unit}`} vs={since} /> : <div className="wt-kpi-sub">first session</div>}
+            </div>
+            <div className="wt-kpi">
+              <div className="wt-kpi-label">Heaviest</div>
+              <div className="wt-kpi-val">{fmtNum(toDisp(best.top.weight, unit))}<small> {unit}</small><span className="wt-kpi-x"> × {best.top.reps || "–"}</span></div>
+              <div className="wt-kpi-sub">{shortDate(best.date)}</div>
+            </div>
+            <div className="wt-kpi">
+              <div className="wt-kpi-label">Est. 1RM</div>
+              <div className="wt-kpi-val">{last.e1 != null ? fmtLoad(last.e1, unit) : "–"}<small> {unit}</small></div>
+              {n > 1 && last.e1 != null && first.e1 != null
+                ? <KpiDelta v={toDisp(last.e1, unit) - toDisp(first.e1, unit)} suffix={` ${unit}`} vs={since} step={unit === "lbs" ? 1 : 0.5} />
+                : <div className="wt-kpi-sub">latest session</div>}
+            </div>
+          </>) : (<>
+            <div className="wt-kpi">
+              <div className="wt-kpi-label">Latest</div>
+              <div className="wt-kpi-val">{last.top.reps || "–"}<small> reps</small></div>
+              {n > 1 ? <KpiDelta v={(last.top.rv ?? 0) - (first.top.rv ?? 0)} suffix=" reps" vs={since} /> : <div className="wt-kpi-sub">first session</div>}
+            </div>
+            <div className="wt-kpi">
+              <div className="wt-kpi-label">Most reps</div>
+              <div className="wt-kpi-val">{best.top.reps || "–"}<small> reps</small></div>
+              <div className="wt-kpi-sub">{shortDate(best.date)}</div>
+            </div>
+            <div className="wt-kpi">
+              <div className="wt-kpi-label">Sessions</div>
+              <div className="wt-kpi-val">{n}</div>
+              <div className="wt-kpi-sub">{since}</div>
+            </div>
+          </>)}
+        </div>
+
+        <div className="wt-chart-card">
+          <ProgressChart points={points} unit={unit} weighted={weighted} selIdx={selIdx} onSelect={setSel} prIdx={prIdx} exName={exName} />
+          {n === 1 && <div className="wt-hint wt-chart-note">Log {exName} again to start seeing a trend.</div>}
+
+          {p && (
+            <div className="wt-readout" aria-live="polite">
+              <div className="wt-readout-head">
+                <span className="wt-readout-date">{fmtDate(p.date)}</span>
+                <span className="wt-readout-name">{p.name}</span>
+                {selIdx === prIdx && n > 1 && <span className="wt-pr-chip">PR</span>}
+              </div>
+              <div className="wt-readout-vals">
+                {weighted && (
+                  <div className="wt-readout-val"><span className="wt-key w" aria-hidden="true" />
+                    <strong>{p.top.weight != null ? fmtNum(toDisp(p.top.weight, unit)) : "–"}</strong><em>{unit}</em><span>top set</span></div>
+                )}
+                <div className="wt-readout-val"><span className="wt-key r" aria-hidden="true" />
+                  <strong>{p.top.reps || "–"}</strong><span>reps</span></div>
+                {p.e1 != null && (
+                  <div className="wt-readout-val"><strong>{fmtLoad(p.e1, unit)}</strong><em>{unit}</em><span>est. 1RM</span></div>
+                )}
+              </div>
+              <div className="wt-readout-sets">All sets: {p.sets.map((s) => setLine(s, unit)).join("  ·  ")}</div>
+            </div>
+          )}
+
+          <div className="wt-chart-foot">
+            <span className="wt-hint">Tap or drag across the chart to inspect a session.</span>
+            <button className="wt-ghost small" onClick={() => setShowTable((v) => !v)} aria-expanded={showTable}>
+              {showTable ? "Hide data table" : "Show data table"}
+            </button>
+          </div>
+          {showTable && (
+            <div className="wt-ptable-wrap">
+              <table className="wt-ptable">
+                <thead><tr><th scope="col">Date</th><th scope="col">Top set</th>{weighted && <th scope="col">Est. 1RM</th>}<th scope="col">All sets</th></tr></thead>
+                <tbody>
+                  {points.map((pt, i) => ({ pt, i })).reverse().map(({ pt, i }) => (
+                    <tr key={pt.date} className={i === selIdx ? "on" : ""} onClick={() => setSel(i)}>
+                      <td>{shortDate(pt.date)}</td>
+                      <td>{setLine(pt.top, unit)}</td>
+                      {weighted && <td>{pt.e1 != null ? fmtLoad(pt.e1, unit) : "–"}</td>}
+                      <td>{pt.sets.map((s) => setLine(s, unit)).join(" · ")}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
+        </div>
+      </>)}
+
+      <PREstimator unit={unit} suggestion={weighted ? bestSet : null} exName={exName} />
+    </div>
+  );
 }
 
 // ============ CALENDAR ============
@@ -871,6 +1535,23 @@ function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemov
   const meta = registry.get(norm(entry.exercise));
   const imgId = meta && meta.img;
 
+  // Live 1-rep-max estimate from today's sets vs your best estimate on record.
+  const prevBest = useMemo(() => {
+    const k = norm(entry.exercise);
+    let best = null;
+    for (const w of workouts) {
+      if (w.id === draftId) continue;
+      for (const e of w.entries || []) {
+        if (norm(e.exercise) !== k) continue;
+        const b = bestE1(e.sets);
+        if (b && (!best || b.e1 > best.e1)) best = { ...b, date: w.date };
+      }
+    }
+    return best;
+  }, [workouts, entry.exercise, draftId]);
+  const today = bestE1(entry.sets);
+  const isNewPR = today && prevBest && today.e1 > prevBest.e1 + 0.01;
+
   const setSet = (i, field, val) => onChange((e) => {
     const sets = e.sets.map((s, j) => {
       if (j !== i) return s;
@@ -910,7 +1591,7 @@ function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemov
         <span className="wt-plate" aria-hidden="true" />
         <div className="wt-card-titlewrap">
           <div className="wt-card-title">{entry.exercise}</div>
-          <div className="wt-card-sub">{entry.muscle} · {muscleRegion(entry.muscle)}</div>
+          <div className="wt-card-sub"><span>{entry.muscle}{norm(muscleRegion(entry.muscle)) !== norm(entry.muscle || "") ? ` · ${muscleRegion(entry.muscle)}` : ""}</span> <EquipTag meta={meta || { equipment: "" }} /></div>
         </div>
         {imgId && (
           <button className={"wt-demo-btn" + (showDemo ? " on" : "")} onClick={() => setShowDemo((v) => !v)} aria-expanded={showDemo}>
@@ -944,6 +1625,14 @@ function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemov
           </div>
         ))}
         <button className="wt-ghost small" onClick={addSet}>+ Add set</button>
+        {today && (
+          <div className={"wt-e1-live" + (isNewPR ? " pr" : "")} aria-live="polite">
+            <span>Est. 1-rep max today <strong>{fmtLoad(today.e1, unit)} {unit}</strong></span>
+            {isNewPR
+              ? <span className="wt-e1-badge">▲ New estimated PR</span>
+              : prevBest && <span className="wt-e1-prev">best {fmtLoad(prevBest.e1, unit)} {unit}</span>}
+          </div>
+        )}
       </div>
 
       {similar.items.length > 0 && (
@@ -973,11 +1662,10 @@ function EntryCard({ entry, unit, workouts, registry, draftId, onChange, onRemov
 // ============ EXERCISE PICKER ============
 function ExercisePicker({ registry, workouts, onPick, onClose, onAddCustom }) {
   const [q, setQ] = useState("");
-  const [region, setRegion] = useState("All");
+  const [f, setF] = useState(EMPTY_FILTER);
   const [adding, setAdding] = useState(false);
   const inputRef = useRef(null);
   useEffect(() => { inputRef.current && inputRef.current.focus(); }, []);
-  const regions = ["All", "Chest", "Back", "Legs", "Shoulders", "Arms", "Core"];
 
   const recent = useMemo(() => {
     const seen = new Set(); const out = [];
@@ -988,23 +1676,24 @@ function ExercisePicker({ registry, workouts, onPick, onClose, onAddCustom }) {
     return out;
   }, [workouts, registry]);
 
-  const { mine, db } = useMemo(() => {
+  const { mine, db, dbTotal } = useMemo(() => {
     const nq = norm(q);
     const rank = (name) => (norm(name).startsWith(nq) ? 0 : 1);
-    const inRegion = (m) => region === "All" || muscleRegion(m.muscle) === region;
     const mine = [], db = [];
     for (const meta of registry.values()) {
-      if (!inRegion(meta)) continue;
+      if (!matchFilter(meta, f)) continue;
       if (nq && !norm(meta.name).includes(nq)) continue;
       (meta.source === "db" ? db : mine).push(meta);
     }
     const cmp = (a, b) => (nq ? rank(a.name) - rank(b.name) : 0) || a.name.length - b.name.length || a.name.localeCompare(b.name);
     mine.sort(cmp); db.sort(cmp);
-    return { mine: mine.slice(0, 25), db: db.slice(0, 40) };
-  }, [q, region, registry]);
+    return { mine: mine.slice(0, 25), db: db.slice(0, 60), dbTotal: db.length };
+  }, [q, f, registry]);
 
-  const showBrowse = q === "" && region === "All";
+  const showBrowse = q === "" && !filterActive(f);
   const nothing = !showBrowse && mine.length === 0 && db.length === 0;
+  const filterDesc = [f.muscle ? capFirst(f.muscle) : f.region !== "All" ? f.region : null,
+    f.equip !== "any" ? (EQUIP_KINDS.find(([k]) => k === f.equip) || [])[1] : null].filter(Boolean).join(", ");
 
   return (
     <div className="wt-modal-back" onClick={(e) => e.target === e.currentTarget && onClose()}>
@@ -1015,8 +1704,8 @@ function ExercisePicker({ registry, workouts, onPick, onClose, onAddCustom }) {
               <input ref={inputRef} className="wt-search" placeholder="Search 870+ exercises…" value={q} onChange={(e) => setQ(e.target.value)} />
               <button className="wt-x" onClick={onClose} aria-label="Close">✕</button>
             </div>
-            <div className="wt-regions pad-v">
-              {regions.map((r) => <button key={r} className={"wt-chip sm" + (region === r ? " on" : "")} onClick={() => setRegion(r)}>{r}</button>)}
+            <div className="pad-v">
+              <ExerciseFilters f={f} setF={setF} small />
             </div>
             <div className="wt-picker-list">
               {showBrowse ? (
@@ -1033,12 +1722,13 @@ function ExercisePicker({ registry, workouts, onPick, onClose, onAddCustom }) {
                   {mine.map((m) => <PickRow key={m.name} m={m} onPick={onPick} />)}
                 </>)}
                 {db.length > 0 && (<>
-                  <div className="wt-picker-label">Exercise database</div>
+                  <div className="wt-picker-label">Exercise database · {dbTotal}</div>
                   {db.map((m) => <PickRow key={m.name} m={m} onPick={onPick} />)}
+                  {dbTotal > db.length && <div className="wt-hint pad">Showing {db.length} of {dbTotal}. Search or narrow the filters to see the rest.</div>}
                 </>)}
                 {nothing && (
                   <div className="wt-nomatch">
-                    <div>No match for “{q}”{region !== "All" ? ` in ${region}` : ""}.</div>
+                    <div>No match{q ? <> for “{q}”</> : ""}{filterDesc ? ` in ${filterDesc}` : ""}.</div>
                     <button className="wt-primary" onClick={() => setAdding(true)}>Create it as a custom exercise</button>
                   </div>
                 )}
@@ -1068,8 +1758,13 @@ function PickRow({ m, onPick }) {
       <div className="wt-pick-row-inner">
         <button className="wt-pick-row" onClick={() => onPick(m)}>
           <span className="wt-plate sm" aria-hidden="true" />
-          <span className="wt-pick-name">{m.name}</span>
-          <span className="wt-pick-meta">{m.muscle}{m.equipment ? ` · ${m.equipment}` : ""}{m.source === "custom" ? " · custom" : ""}</span>
+          <span className="wt-pick-text">
+            <span className="wt-pick-name">{m.name}</span>
+            <span className="wt-pick-meta">
+              <span className="wt-pick-muscle">{m.muscle}{m.source === "custom" ? " · custom" : ""}</span>
+              <EquipTag meta={m} />
+            </span>
+          </span>
         </button>
         {m.img && (
           <button className={"wt-pick-demo" + (showDemo ? " on" : "")} onClick={(e) => { e.stopPropagation(); setShowDemo((v) => !v); }}
@@ -1081,11 +1776,19 @@ function PickRow({ m, onPick }) {
   );
 }
 
+// Stored values match the exercise database's vocabulary so tags and filters classify them the same way.
+const CUSTOM_EQUIPMENT = [
+  ["", "Not specified"], ["body only", "Bodyweight (no weights)"], ["dumbbell", "Dumbbell"], ["barbell", "Barbell"],
+  ["kettlebells", "Kettlebell"], ["e-z curl bar", "EZ bar"], ["machine", "Machine"], ["cable", "Cable"],
+  ["bands", "Bands"], ["other", "Other"],
+];
 function CustomForm({ initialName, initialMuscle, initialEquipment, saveLabel, onSave, onCancel }) {
   const [name, setName] = useState(initialName || "");
   const [muscle, setMuscle] = useState(initialMuscle || "chest");
   const [equipment, setEquipment] = useState(initialEquipment || "");
   const muscles = Object.keys(MUSCLE_META).filter((m) => m !== "other");
+  // Older customs stored free text; keep it selectable so editing doesn't silently drop it.
+  const equipOptions = CUSTOM_EQUIPMENT.some(([v]) => v === equipment) ? CUSTOM_EQUIPMENT : [...CUSTOM_EQUIPMENT, [equipment, equipment]];
   return (
     <div className="wt-form">
       <label>Name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Hammer curl (rope)" /></label>
@@ -1094,7 +1797,11 @@ function CustomForm({ initialName, initialMuscle, initialEquipment, saveLabel, o
           {muscles.map((m) => <option key={m} value={m}>{m} — {muscleRegion(m)}</option>)}
         </select>
       </label>
-      <label>Equipment (optional)<input value={equipment} onChange={(e) => setEquipment(e.target.value)} placeholder="e.g. cable, dumbbell" /></label>
+      <label>Equipment
+        <select value={equipment} onChange={(e) => setEquipment(e.target.value)}>
+          {equipOptions.map(([v, label]) => <option key={v || "none"} value={v}>{label}</option>)}
+        </select>
+      </label>
       <div className="wt-form-actions">
         <button className="wt-primary" disabled={!name.trim()} onClick={() => onSave({ name: name.trim(), muscle, equipment: equipment.trim(), source: "custom" })}>{saveLabel || "Save exercise"}</button>
         <button className="wt-ghost" onClick={onCancel}>Back</button>
@@ -1150,30 +1857,30 @@ function HistoryView({ unit, workouts, onDelete, onEdit, who, flash, readOnly = 
 }
 
 // ============ EXERCISES LIBRARY ============
-function ExercisesView({ registry, workouts, unit, flash, myId, onAddCustom, onEditCustom, onDeleteCustom }) {
+const LIB_CAP = 150;
+function ExercisesView({ registry, workouts, unit, flash, myId, onAddCustom, onEditCustom, onDeleteCustom, onShowProgress }) {
   const [q, setQ] = useState("");
-  const [region, setRegion] = useState("All");
+  const [f, setF] = useState(EMPTY_FILTER);
   const [adding, setAdding] = useState(false);
   const [openEx, setOpenEx] = useState(null);
   const [allCustom, setAllCustom] = useState(null); // crew-wide customs with author
   const [editingId, setEditingId] = useState(null);
-  const regions = ["All", "Chest", "Back", "Legs", "Shoulders", "Arms", "Core"];
 
   const loadCustoms = () => fetchAllCustom().then(setAllCustom).catch(() => setAllCustom([]));
   useEffect(() => { loadCustoms(); }, []);
 
-  const list = useMemo(() => {
+  const { list, total } = useMemo(() => {
     const nq = norm(q);
     const out = [];
     for (const meta of registry.values()) {
       if (nq && !norm(meta.name).includes(nq)) continue;
-      if (region !== "All" && muscleRegion(meta.muscle) !== region) continue;
+      if (!matchFilter(meta, f)) continue;
       out.push(meta);
-      if (out.length >= 120) break;
     }
+    // your own exercises first, then the database, alphabetically
     out.sort((a, b) => (a.source === "db" ? 1 : 0) - (b.source === "db" ? 1 : 0) || a.name.localeCompare(b.name));
-    return out;
-  }, [q, region, registry]);
+    return { list: out.slice(0, LIB_CAP), total: out.length };
+  }, [q, f, registry]);
 
   return (
     <div className="wt-pane">
@@ -1204,7 +1911,10 @@ function ExercisesView({ registry, workouts, unit, flash, myId, onAddCustom, onE
                   <span className="wt-plate sm" aria-hidden="true" />
                   <div className="wt-lib-main">
                     <span className="wt-pick-name">{c.name}</span>
-                    <span className="wt-pick-meta">{c.muscle}{c.equipment ? ` · ${c.equipment}` : ""} · added by {c.user_id === myId ? "you" : c.author}</span>
+                    <span className="wt-pick-meta">
+                      <span className="wt-pick-muscle">{c.muscle} · added by {c.user_id === myId ? "you" : c.author}</span>
+                      <EquipTag meta={c} />
+                    </span>
                   </div>
                   {c.user_id === myId && (
                     <div className="wt-cust-actions">
@@ -1221,9 +1931,8 @@ function ExercisesView({ registry, workouts, unit, flash, myId, onAddCustom, onE
 
       {/* --- Full library browser --- */}
       <input className="wt-search" placeholder="Search the library…" value={q} onChange={(e) => setQ(e.target.value)} />
-      <div className="wt-regions">
-        {regions.map((r) => <button key={r} className={"wt-chip" + (region === r ? " on" : "")} onClick={() => setRegion(r)}>{r}</button>)}
-      </div>
+      <ExerciseFilters f={f} setF={setF} />
+      <div className="wt-lib-count">{total} exercise{total === 1 ? "" : "s"}{total > list.length ? ` · showing first ${list.length}` : ""}</div>
       <div className="wt-lib">
         {list.map((m) => {
           const last = lastPerformance(workouts, m.name, null);
@@ -1234,11 +1943,17 @@ function ExercisesView({ registry, workouts, unit, flash, myId, onAddCustom, onE
                 <span className="wt-plate sm" aria-hidden="true" />
                 <div className="wt-lib-main">
                   <span className="wt-pick-name">{m.name}</span>
-                  <span className="wt-pick-meta">{m.muscle}{m.equipment ? ` · ${m.equipment}` : ""}{m.source === "custom" ? " · custom" : ""}{m.img ? " · ▶ demo" : ""}</span>
+                  <span className="wt-pick-meta">
+                    <span className="wt-pick-muscle">{m.muscle}{m.source === "custom" ? " · custom" : ""}{m.img ? " · ▶ demo" : ""}</span>
+                    <EquipTag meta={m} />
+                  </span>
                 </div>
                 {last && <span className="wt-lib-last">{last.sets.slice(0, 3).map((s) => setLine(s, unit)).join(" · ")}<br /><em>{daysAgo(last.date)}</em></span>}
               </button>
               {isOpen && (m.img ? <ExerciseAnim imgId={m.img} name={m.name} /> : <div className="wt-anim-err">No demo images for this one{m.source === "custom" ? " — custom exercises don’t have demos yet" : ""}.</div>)}
+              {isOpen && last && onShowProgress && (
+                <button className="wt-ghost small wt-lib-progress" onClick={() => onShowProgress(m.name)}>View progress chart →</button>
+              )}
             </div>
           );
         })}
@@ -1561,4 +2276,139 @@ const CSS = `
 .wt-toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--accent);color:var(--accent-ink);font-weight:700;padding:10px 18px;border-radius:999px;z-index:30}
 @media (prefers-reduced-motion:no-preference){.wt-toast{animation:wt-pop .18s ease-out}}
 @keyframes wt-pop{from{transform:translateX(-50%) translateY(8px);opacity:0}}
+
+/* ---------- v10: chart palette (validated: dataviz validate_palette.js, both modes pass) ---------- */
+.wt-root.theme-dark{--viz-w:#9d7ee0;--viz-r:#1f9e76;--viz-grid:#2A2535;--viz-base:#453D57;--viz-up:#3ecf6e;--viz-down:#ef8080;--tag-bw:#1f9e76}
+.wt-root.theme-light{--viz-w:#7148b5;--viz-r:#0f8a68;--viz-grid:#EEEAF5;--viz-base:#C9C0DC;--viz-up:#1a7f37;--viz-down:#c93636;--tag-bw:#0f8a68}
+
+/* selected chips: filled, so the label stays readable in dark mode */
+.wt-chip.on{background:var(--accent);border-color:var(--accent);color:var(--accent-ink)}
+.pad-v{padding:10px 0 2px}
+
+/* ---------- filters: muscle group -> specific muscle -> equipment ---------- */
+.wt-filters{display:flex;flex-direction:column;gap:8px}
+.wt-subchips{display:flex;gap:6px;flex-wrap:wrap;padding:8px;background:var(--panel2);border:1px solid var(--line);border-radius:12px}
+.wt-subchip{background:transparent;border:1px solid transparent;color:var(--text);border-radius:999px;padding:5px 11px;font:inherit;font-size:13px;cursor:pointer}
+.wt-subchip:hover{border-color:var(--line)}
+.wt-subchip.on{background:var(--panel);border-color:var(--accent-soft);font-weight:600}
+.wt-equip-select{display:flex;align-items:center;gap:8px;font-size:13px;color:var(--dim)}
+.wt-equip-select select{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:8px;padding:6px 8px;font:inherit;font-size:13px}
+.wt-lib-count{font-size:12px;color:var(--dim);letter-spacing:.04em}
+.wt-lib-progress{margin:6px 0 2px;color:var(--accent-soft);font-weight:600}
+
+/* ---------- equipment tags ---------- */
+.wt-etag{display:inline-flex;align-items:center;flex:none;font-size:11px;font-weight:600;line-height:1;padding:3px 7px;border-radius:999px;border:1px solid var(--line);color:var(--dim);text-transform:none;letter-spacing:.01em;white-space:nowrap}
+.wt-etag.bodyweight{border-color:var(--tag-bw);color:var(--text);background:color-mix(in srgb, var(--tag-bw) 16%, transparent)}
+.wt-etag.bodyweight::before{content:'';width:6px;height:6px;border-radius:50%;background:var(--tag-bw);margin-right:5px}
+.wt-pick-text{display:flex;flex-direction:column;gap:3px;min-width:0;flex:1}
+.wt-pick-text .wt-pick-name{max-width:none}
+.wt-pick-meta{display:flex;align-items:center;gap:6px;min-width:0}
+.wt-pick-muscle{overflow:hidden;text-overflow:ellipsis;white-space:nowrap;min-width:0}
+.wt-card-sub{display:flex;align-items:center;gap:6px;flex-wrap:wrap}
+
+/* ---------- live 1RM while logging ---------- */
+.wt-e1-live{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap;font-size:12px;color:var(--dim);background:var(--panel2);border-radius:8px;padding:7px 10px;margin-top:2px}
+.wt-e1-live strong{color:var(--text);font-family:'Barlow Condensed',sans-serif;font-size:16px;margin-left:4px}
+.wt-e1-live.pr{box-shadow:inset 3px 0 0 var(--viz-up)}
+.wt-e1-badge{color:var(--viz-up);font-weight:700}
+.wt-e1-prev{font-size:12px}
+
+/* ---------- progress tab ---------- */
+.wt-prog-filters{display:flex;gap:8px;align-items:flex-end;flex-wrap:wrap}
+.wt-prog-ex{display:flex;flex-direction:column;gap:4px;flex:1;min-width:180px}
+.wt-prog-ex-label{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+.wt-prog-ex select{background:var(--panel);border:1px solid var(--line);color:var(--text);border-radius:10px;padding:10px;font:inherit;font-size:15px;text-transform:capitalize}
+.wt-seg{display:flex;border:1px solid var(--line);border-radius:10px;overflow:hidden;flex:none}
+.wt-seg-btn{background:var(--panel);border:0;border-left:1px solid var(--line);color:var(--dim);font:inherit;font-weight:600;font-size:13px;padding:10px 13px;cursor:pointer;min-width:44px}
+.wt-seg-btn:first-child{border-left:0}
+.wt-seg-btn.on{background:var(--accent);color:var(--accent-ink)}
+.wt-prog-head{display:flex;align-items:center;gap:10px;margin-top:2px}
+.wt-prog-name{font-family:'Barlow Condensed',sans-serif;font-size:24px;font-weight:700;text-transform:capitalize;flex:1;min-width:0;line-height:1.1}
+.wt-empty.small{padding:18px 12px}
+
+.wt-kpis{display:grid;grid-template-columns:repeat(3,minmax(0,1fr));gap:8px}
+.wt-kpi{background:var(--panel);border:1px solid var(--line);border-radius:12px;padding:10px 10px 9px;min-width:0}
+.wt-kpi-label{font-size:10.5px;letter-spacing:.1em;text-transform:uppercase;color:var(--dim);white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.wt-kpi-val{font-family:'Barlow Condensed',sans-serif;font-size:24px;font-weight:700;line-height:1.15;margin:3px 0 2px;white-space:nowrap}
+.wt-kpi-val small{font-size:12px;font-weight:600;color:var(--dim)}
+.wt-kpi-x{font-size:15px;font-weight:600;color:var(--dim)}
+.wt-kpi-sub{font-size:11px;color:var(--dim);line-height:1.35}
+.wt-kpi-sub.stack{display:flex;flex-direction:column}
+.wt-kpi-delta{font-weight:700;white-space:nowrap}
+.wt-kpi-delta.up{color:var(--viz-up)}
+.wt-kpi-delta.down{color:var(--viz-down)}
+.wt-kpi-delta.flat{color:var(--dim)}
+
+.wt-chart-card{background:var(--panel);border:1px solid var(--line);border-radius:14px;padding:12px 12px 10px;display:flex;flex-direction:column;gap:10px}
+.wt-viz{width:100%}
+.wt-viz-svg{display:block;touch-action:pan-y;cursor:crosshair;outline:none;border-radius:6px}
+.wt-viz-svg:focus-visible{box-shadow:0 0 0 2px var(--accent-soft)}
+.wt-viz-svg text{font-family:'Barlow',-apple-system,'Segoe UI',sans-serif}
+.wt-viz-title{fill:var(--text);font-size:12px;font-weight:600}
+.wt-viz-tick{fill:var(--dim);font-size:10.5px;font-variant-numeric:tabular-nums}
+.wt-viz-grid{stroke:var(--viz-grid);stroke-width:1}
+.wt-viz-base{stroke:var(--viz-base);stroke-width:1}
+.wt-viz-cross{stroke:var(--dim);stroke-width:1;opacity:.55}
+.wt-viz-line{fill:none;stroke:var(--viz-w);stroke-width:2;stroke-linejoin:round;stroke-linecap:round}
+.wt-viz-dot{fill:var(--viz-w);stroke:var(--panel);stroke-width:2}
+.wt-viz-wash-top{stop-color:var(--viz-w);stop-opacity:.18}
+.wt-viz-wash-bot{stop-color:var(--viz-w);stop-opacity:0}
+.wt-viz-bar{fill:var(--viz-r);opacity:.72;transition:opacity .12s}
+.wt-viz-bar.sel{opacity:1}
+.wt-viz-end{fill:var(--text);font-size:12px;font-weight:700}
+.wt-viz-pr{fill:var(--text);font-size:10px;font-weight:800;letter-spacing:.08em}
+.wt-viz-key{stroke-width:2;stroke-linecap:round}
+.wt-viz-key.w{stroke:var(--viz-w)}
+.wt-viz-key-bar{fill:var(--viz-r)}
+.wt-chart-note{text-align:center;font-size:13px}
+
+.wt-readout{background:var(--panel2);border-radius:10px;padding:10px 12px;display:flex;flex-direction:column;gap:8px}
+.wt-readout-head{display:flex;align-items:baseline;gap:8px;flex-wrap:wrap}
+.wt-readout-date{font-family:'Barlow Condensed',sans-serif;font-size:17px;font-weight:700}
+.wt-readout-name{font-size:13px;color:var(--dim);text-transform:capitalize}
+.wt-pr-chip{font-size:10px;font-weight:800;letter-spacing:.1em;padding:3px 7px;border-radius:999px;background:var(--accent);color:var(--accent-ink)}
+.wt-readout-vals{display:flex;gap:6px 18px;flex-wrap:wrap}
+.wt-readout-val{display:flex;align-items:baseline;gap:5px}
+.wt-readout-val strong{font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:700;line-height:1}
+.wt-readout-val em{font-style:normal;font-size:12px;color:var(--dim);font-weight:600}
+.wt-readout-val span:not(.wt-key){font-size:12px;color:var(--dim)}
+.wt-key{display:inline-block;width:12px;height:2px;border-radius:1px;align-self:center;margin-right:2px}
+.wt-key.w{background:var(--viz-w)}
+.wt-key.r{background:var(--viz-r)}
+.wt-readout-sets{font-size:12.5px;color:var(--dim)}
+.wt-chart-foot{display:flex;align-items:center;justify-content:space-between;gap:8px;flex-wrap:wrap}
+.wt-chart-foot .wt-hint{font-size:12px}
+.wt-ptable-wrap{overflow-x:auto;border:1px solid var(--line);border-radius:10px}
+.wt-ptable{width:100%;border-collapse:collapse;font-size:12.5px}
+.wt-ptable th{text-align:left;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:600;padding:8px 10px;border-bottom:1px solid var(--line);white-space:nowrap}
+.wt-ptable td{padding:8px 10px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums;vertical-align:top}
+.wt-ptable td:first-child,.wt-ptable td:nth-child(2){white-space:nowrap}
+.wt-ptable tr:last-child td{border-bottom:0}
+.wt-ptable tbody tr{cursor:pointer}
+.wt-ptable tr.on td{background:var(--panel2)}
+
+/* ---------- PR estimator ---------- */
+.wt-pre{display:flex;flex-direction:column;gap:10px}
+.wt-pre-lede{margin:-2px 0 0;font-size:13px}
+.wt-pre-inputs{display:flex;align-items:flex-end;gap:10px}
+.wt-pre-inputs label{display:flex;flex-direction:column;gap:5px;font-size:12px;color:var(--dim);flex:1;min-width:0}
+.wt-pre-inputs input{background:var(--panel2);border:1px solid var(--line);border-radius:10px;color:var(--text);font-family:'Barlow Condensed',sans-serif;font-size:22px;font-weight:700;padding:8px 12px;width:100%;min-width:0}
+.wt-pre-inputs input:focus{outline:2px solid var(--accent);outline-offset:0;border-color:transparent}
+.wt-pre-x{font-size:20px;color:var(--dim);padding-bottom:10px}
+.wt-pre-hero{display:flex;flex-direction:column;align-items:center;gap:2px;padding:12px 8px;background:var(--panel2);border-radius:12px;text-align:center}
+.wt-pre-hero-label{font-size:11px;letter-spacing:.14em;text-transform:uppercase;color:var(--dim)}
+.wt-pre-hero-val{font-family:'Barlow Condensed',sans-serif;font-size:52px;font-weight:700;line-height:1}
+.wt-pre-hero-val em{font-style:normal;font-size:20px;color:var(--dim)}
+.wt-pre-range{font-size:12px;color:var(--dim)}
+.wt-pre-warn{font-size:12.5px;color:var(--text);background:var(--panel2);border-left:3px solid var(--viz-down);border-radius:8px;padding:8px 10px}
+.wt-pre-table{width:100%;border-collapse:collapse;font-size:13px}
+.wt-pre-table caption{text-align:left;font-size:12px;color:var(--dim);padding-bottom:6px}
+.wt-pre-table th{text-align:left;font-size:10.5px;letter-spacing:.08em;text-transform:uppercase;color:var(--dim);font-weight:600;padding:6px 8px;border-bottom:1px solid var(--line)}
+.wt-pre-table td{padding:6px 8px;border-bottom:1px solid var(--line);font-variant-numeric:tabular-nums}
+.wt-pre-table tr:last-child td{border-bottom:0}
+.wt-pre-table tr.on td{background:var(--panel2);font-weight:700}
+.wt-pre-src{font-size:12.5px}
+.wt-pre-how summary{cursor:pointer;font-size:13px;color:var(--accent-soft);font-weight:600}
+.wt-pre-how p{font-size:12.5px;color:var(--dim);margin:6px 0 0;line-height:1.5}
+@media (max-width:380px){.wt-kpi-val{font-size:20px}.wt-kpi-x{font-size:13px}}
 `;
