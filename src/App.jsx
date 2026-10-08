@@ -1,6 +1,6 @@
 import { useState, useEffect, useMemo, useRef } from "react";
 import { EXDB } from "./exdb.js";
-import { SEED } from "./seed.js";
+import { newId, makeOp, migrateQueue, enqueue, settle, applyOps, flushOps } from "./sync.js";
 import {
   supabase, configured, getSession, signIn, signUp, signOut, updatePassword, sendPasswordReset,
   fetchMyProfile, fetchProfiles, updateUnit, updatePrivacy, updateDisplayName, updateEmail,
@@ -15,6 +15,9 @@ const COMMON_DAYS = ["push", "pull", "legs", "upper", "lower", "full body", "che
 const THEME_KEY = "ironbook:theme";
 const draftKey = (uid) => `ironbook:draft:${uid}`;
 const queueKey = (uid) => `ironbook:queue:${uid}`;
+// Set by MainApp while a past session is open for editing (that state isn't saved on the phone),
+// so the update banner won't auto-reload over it.
+let reloadBlocked = false;
 
 // Muscle -> region + competition-plate color
 const MUSCLE_META = {
@@ -354,6 +357,21 @@ export default function App() {
     return () => data.subscription.unsubscribe();
   }, []);
 
+  const updateReady = useAppUpdate();
+  const [updateHidden, setUpdateHidden] = useState(false);
+  // Rendered outside Shell (so it shows on every screen); carries its own small stylesheet.
+  const banner = updateReady && !updateHidden && (
+    <div className="wt-update" role="status">
+      <style>{UPDATE_CSS}</style>
+      <span className="wt-update-msg">New version ready</span>
+      <button className="wt-update-btn" onClick={() => window.location.reload()}>Refresh</button>
+      <button className="wt-update-later" onClick={() => setUpdateHidden(true)} aria-label="Hide for now; the app updates the next time you open it">Later</button>
+    </div>
+  );
+
+  return <>{banner}{renderScreen()}</>;
+
+  function renderScreen() {
   if (!configured) return (
     <Shell theme={theme}>
       <div className="wt-confirm-wrap">
@@ -371,6 +389,53 @@ export default function App() {
   }} />;
   if (!session) return <AuthScreen theme={theme} onToggleTheme={toggleTheme} />;
   return <MainApp key={session.user.id} session={session} theme={theme} onToggleTheme={toggleTheme} />;
+  }
+}
+
+// ============ APP UPDATES ============
+const UPDATE_CSS = `
+.wt-update{position:fixed;z-index:60;left:calc(10px + env(safe-area-inset-left));right:calc(10px + env(safe-area-inset-right));
+  top:calc(8px + env(safe-area-inset-top));display:flex;align-items:center;gap:8px;padding:8px 8px 8px 14px;border-radius:12px;
+  background:#5F3687;color:#F5F3FB;font-family:'Barlow',-apple-system,'Segoe UI',sans-serif;font-size:15px;font-weight:600;
+  box-shadow:0 6px 24px rgba(0,0,0,.35)}
+.wt-update-msg{flex:1;min-width:0}
+.wt-update button{font:inherit;border-radius:8px;min-height:40px;padding:0 14px;cursor:pointer}
+.wt-update-btn{background:#F5F3FB;color:#3B1F57;border:0;font-weight:700}
+.wt-update-later{background:transparent;color:#F5F3FB;border:1px solid rgba(245,243,251,.45)}
+@media (prefers-reduced-motion:no-preference){.wt-update{animation:wt-update-in .2s ease-out}}
+@keyframes wt-update-in{from{transform:translateY(-12px);opacity:0}to{transform:none;opacity:1}}
+`;
+
+// sw.js activates a new version as soon as it downloads (skipWaiting + clients.claim), but the open
+// page keeps running the old code. That's why updates used to need two relaunches. Now:
+//  - every time the app comes to the foreground we ask the browser to check for a new sw.js;
+//  - when a new version takes over, a banner offers Refresh;
+//  - if the app is then backgrounded and reopened, it refreshes by itself — unless a past session
+//    is open for editing. (An in-progress workout is saved on the phone, so it survives a refresh.)
+function useAppUpdate() {
+  const [ready, setReady] = useState(false);
+  useEffect(() => {
+    if (!("serviceWorker" in navigator)) return;
+    const sw = navigator.serviceWorker;
+    let hadController = Boolean(sw.controller); // false on first install: nothing to announce then
+    let isReady = false;
+    const onControllerChange = () => {
+      if (!hadController) { hadController = true; return; }
+      isReady = true; setReady(true);
+    };
+    const onVisibility = () => {
+      if (document.visibilityState !== "visible") return;
+      if (isReady && !reloadBlocked) { window.location.reload(); return; }
+      sw.getRegistration().then((r) => r && r.update()).catch(() => {});
+    };
+    sw.addEventListener("controllerchange", onControllerChange);
+    document.addEventListener("visibilitychange", onVisibility);
+    return () => {
+      sw.removeEventListener("controllerchange", onControllerChange);
+      document.removeEventListener("visibilitychange", onVisibility);
+    };
+  }, []);
+  return ready;
 }
 
 // ============ RESET PASSWORD (after clicking the email link) ============
@@ -415,6 +480,7 @@ function AuthScreen({ theme, onToggleTheme }) {
   const [name, setName] = useState("");
   const [email, setEmail] = useState("");
   const [pw, setPw] = useState("");
+  const [invite, setInvite] = useState("");
   const [err, setErr] = useState("");
   const [notice, setNotice] = useState("");
   const [busy, setBusy] = useState(false);
@@ -424,8 +490,17 @@ function AuthScreen({ theme, onToggleTheme }) {
     try {
       if (mode === "signup") {
         if (name.trim().length < 2) throw new Error("Pick a display name (2+ characters).");
+        if (!invite.trim()) throw new Error("Enter the invite code from the crew.");
         if (pw.length < 6) throw new Error("Password must be at least 6 characters.");
-        await signUp(email.trim(), pw, name.trim());
+        try {
+          await signUp(email.trim(), pw, name.trim(), invite.trim());
+        } catch (e) {
+          // The invite check runs in the database (patch_invite_code.sql); a wrong code surfaces as this.
+          if (/database error saving new user/i.test(e.message || "")) {
+            throw new Error("That invite code didn’t work. Ask the crew for the current code.");
+          }
+          throw e;
+        }
       } else if (mode === "forgot") {
         if (!email.trim()) throw new Error("Enter your email first.");
         await sendPasswordReset(email.trim());
@@ -452,6 +527,10 @@ function AuthScreen({ theme, onToggleTheme }) {
         <div className="wt-form auth">
           {mode === "signup" && (
             <label>Display name<input value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Srijan" autoComplete="nickname" /></label>
+          )}
+          {mode === "signup" && (
+            <label>Invite code<input value={invite} onChange={(e) => setInvite(e.target.value)} placeholder="Ask the crew"
+              autoComplete="off" autoCapitalize="none" autoCorrect="off" spellCheck={false} /></label>
           )}
           <label>Email<input type="email" value={email} onChange={(e) => setEmail(e.target.value)} autoComplete="email" inputMode="email"
             onKeyDown={(e) => e.key === "Enter" && mode === "forgot" && submit()} /></label>
@@ -497,16 +576,56 @@ function MainApp({ session, theme, onToggleTheme }) {
   const unit = profile ? profile.unit : "kg";
   const flash = (msg) => { setToast(msg); setTimeout(() => setToast(null), 2200); };
 
-  // Initial load: profile + my workouts + my customs, min 3s loading screen
+  // ---- offline-safe sync (src/sync.js) ----
+  // Queued ops live in localStorage; the screen shows server rows with pending ops applied on top.
+  const syncing = useRef(null);
+  const readQueue = () => migrateQueue(lsGet(queueKey(myId), []));
+  const writeQueue = (ops) => (ops.length ? lsSet(queueKey(myId), ops) : lsDel(queueKey(myId)));
+  const syncApi = {
+    insertWorkout: (id, data) => insertWorkout(myId, { id, ...data }),
+    updateWorkout: (id, data) => updateWorkout(id, data),
+    deleteWorkout: (id) => deleteWorkout(id),
+  };
+  // Send whatever is queued, then reload from the server. One run at a time; a change made during
+  // a run waits for the next one (commit() starts it). Ops added meanwhile are kept by settle().
+  const syncNow = async () => {
+    while (syncing.current) await syncing.current; // let the running flush finish first
+    const run = (async () => {
+      const ops = readQueue();
+      const r = ops.length ? await flushOps(ops, syncApi) : { sent: [], failed: 0, offline: false };
+      if (r.sent.length) {
+        writeQueue(settle(readQueue(), r.sent));
+        try { setWorkouts(applyOps(await fetchWorkouts(myId), readQueue())); } catch { /* keep what's on screen */ }
+      }
+      return { ...r, synced: r.sent.length, pending: readQueue().length };
+    })();
+    const mine = run.catch(() => {});
+    syncing.current = mine;
+    try { return await run; } finally { if (syncing.current === mine) syncing.current = null; }
+  };
+  // Record a change: save it on the phone, show it at once, then try to send it.
+  const commit = async (op) => {
+    writeQueue(enqueue(readQueue(), op));
+    setWorkouts((ws) => applyOps(ws, [op]));
+    const r = await syncNow();
+    return r.pending === 0 ? "synced" : r.offline ? "offline" : "failed";
+  };
+
+  // Initial load: profile + my customs, push anything queued offline, then my workouts. Min 3s loading screen.
   useEffect(() => {
     const minTimer = new Promise((res) => setTimeout(res, 3000));
     (async () => {
       try {
-        const [p, ws, cs] = await Promise.all([fetchMyProfile(myId), fetchWorkouts(myId), fetchCustom(myId)]);
-        await flushQueue(myId, setWorkouts); // push any offline-saved sessions first
+        const [p, cs] = await Promise.all([fetchMyProfile(myId), fetchCustom(myId)]);
+        const q = readQueue();
+        if (q.length) {
+          writeQueue(q); // stores a v10-format queue in the new format (with ids) before sending
+          const r = await flushOps(q, syncApi);
+          writeQueue(settle(q, r.sent));
+        }
         const fresh = await fetchWorkouts(myId);
         await minTimer;
-        setProfile(p); setWorkouts(fresh.length ? fresh : ws); setCustom(cs);
+        setProfile(p); setWorkouts(applyOps(fresh, readQueue())); setCustom(cs);
         setLoaded(true);
       } catch (e) {
         await minTimer;
@@ -515,8 +634,24 @@ function MainApp({ session, theme, onToggleTheme }) {
     })();
   }, [myId]);
 
+  // Retry queued changes when the connection comes back or the app is reopened.
+  useEffect(() => {
+    if (!loaded) return;
+    const retry = () => { if (readQueue().length) syncNow().then((r) => { if (r.synced && !r.pending) flash("Offline changes synced"); }); };
+    const onVis = () => { if (document.visibilityState === "visible") retry(); };
+    window.addEventListener("online", retry);
+    document.addEventListener("visibilitychange", onVis);
+    return () => { window.removeEventListener("online", retry); document.removeEventListener("visibilitychange", onVis); };
+  }, [loaded]);
+
   // Persist draft locally so a mid-workout refresh loses nothing
   useEffect(() => { draft ? lsSet(draftKey(myId), draft) : lsDel(draftKey(myId)); }, [draft, myId]);
+
+  // Each tab opens at the top (after Finish, History used to open wherever the Log page was scrolled).
+  useEffect(() => { window.scrollTo(0, 0); }, [tab]);
+
+  // Tell the update banner (App) not to auto-reload while a past session is open for editing.
+  useEffect(() => { reloadBlocked = Boolean(editing); return () => { reloadBlocked = false; }; }, [editing]);
 
   const registry = useMemo(() => buildRegistry(custom, workouts), [custom, workouts]);
 
@@ -525,32 +660,22 @@ function MainApp({ session, theme, onToggleTheme }) {
     try { await updateUnit(myId, u); } catch { flash("Couldn’t sync unit preference"); }
   };
 
+  const syncMsg = (status, done) => (status === "synced" ? done
+    : status === "offline" ? "Saved offline · syncs when back online"
+    : "Saved on this phone · sync will retry");
+
   const finishWorkout = async (sessionData) => {
-    setDraft(null);
-    try {
-      const saved = await insertWorkout(myId, sessionData);
-      setWorkouts((ws) => [saved, ...ws]);
-      flash("Workout saved"); setTab("history");
-    } catch {
-      const q = lsGet(queueKey(myId), []);
-      lsSet(queueKey(myId), [...q, sessionData]);
-      setWorkouts((ws) => [{ ...sessionData, id: "local-" + uid(), pendingSync: true }, ...ws]);
-      flash("Saved offline — will sync next time you’re online"); setTab("history");
-    }
+    setDraft(null); setTab("history");
+    flash(syncMsg(await commit(makeOp("insert", newId(), sessionData)), "Workout saved"));
   };
 
   const removeWorkout = async (id) => {
-    if (String(id).startsWith("local-")) { setWorkouts((ws) => ws.filter((w) => w.id !== id)); return; }
-    try { await deleteWorkout(id); setWorkouts((ws) => ws.filter((w) => w.id !== id)); flash("Session deleted"); }
-    catch { flash("Couldn’t delete — are you online?"); }
+    flash(syncMsg(await commit(makeOp("delete", id)), "Session deleted"));
   };
 
   const saveEditedWorkout = async (id, sessionData) => {
-    try {
-      const saved = await updateWorkout(id, sessionData);
-      setWorkouts((ws) => ws.map((w) => (w.id === id ? saved : w)));
-      setEditing(null); flash("Workout updated"); setTab("history");
-    } catch { flash("Couldn’t save changes — are you online?"); }
+    setEditing(null); setTab("history");
+    flash(syncMsg(await commit(makeOp("update", id, sessionData)), "Workout updated"));
   };
 
   const addCustom = async (c) => {
@@ -580,17 +705,6 @@ function MainApp({ session, theme, onToggleTheme }) {
     setProfile((p) => ({ ...p, is_private: isPrivate }));
     try { await updatePrivacy(myId, isPrivate); flash(isPrivate ? "Profile is now private" : "Profile is now visible to the crew"); }
     catch { setProfile((p) => ({ ...p, is_private: !isPrivate })); flash("Couldn’t update privacy"); }
-  };
-
-  const importSeed = async () => {
-    flash("Importing spreadsheet history…");
-    try {
-      for (const w of [...SEED].sort((a, b) => a.date.localeCompare(b.date))) {
-        await insertWorkout(myId, { date: w.date, name: w.name, entries: w.entries });
-      }
-      setWorkouts(await fetchWorkouts(myId));
-      flash("History imported");
-    } catch { flash("Import failed partway — check connection and retry"); }
   };
 
   if (!minWait || (!loaded && !loadErr)) return <LoadingScreen theme={theme} label="Fetching your training log" />;
@@ -651,23 +765,13 @@ function MainApp({ session, theme, onToggleTheme }) {
           onShowProgress={(name) => { setProgressKey(norm(name)); setTab("progress"); }} />
       )}
       {tab === "settings" && (
-        <SettingsView flash={flash} hasWorkouts={workouts.length > 0} onImportSeed={importSeed}
+        <SettingsView flash={flash}
           profile={profile} email={session.user.email} onSaveProfile={saveProfileEdits} onTogglePrivacy={togglePrivacy} />
       )}
 
       {toast && <div className="wt-toast">{toast}</div>}
     </Shell>
   );
-}
-
-async function flushQueue(myId, setWorkouts) {
-  const q = lsGet(queueKey(myId), []);
-  if (!q.length) return;
-  const remaining = [];
-  for (const w of q) {
-    try { await insertWorkout(myId, w); } catch { remaining.push(w); }
-  }
-  remaining.length ? lsSet(queueKey(myId), remaining) : lsDel(queueKey(myId));
 }
 
 // ============ PROGRESS ============
@@ -1830,8 +1934,8 @@ function HistoryView({ unit, workouts, onDelete, onEdit, who, flash, readOnly = 
         <div key={w.id} className="wt-hist">
           <button className="wt-hist-head" onClick={() => setOpen(open === w.id ? null : w.id)}>
             <span className="wt-hist-date">{fmtDate(w.date)}</span>
-            <span className="wt-hist-name">{w.name}{w.pendingSync ? " · syncing…" : ""}</span>
-            <span className="wt-hist-n">{w.entries.length} exercises</span>
+            <span className="wt-hist-name">{w.name}{w.pendingSync ? <span className="wt-pending">Waiting to sync</span> : null}</span>
+            <span className="wt-hist-n">{w.entries.length} exercise{w.entries.length === 1 ? "" : "s"}</span>
           </button>
           {open === w.id && (
             <div className="wt-hist-body">
@@ -1964,7 +2068,7 @@ function ExercisesView({ registry, workouts, unit, flash, myId, onAddCustom, onE
 }
 
 // ============ SETTINGS ============
-function SettingsView({ flash, hasWorkouts, onImportSeed, profile, email, onSaveProfile, onTogglePrivacy }) {
+function SettingsView({ flash, profile, email, onSaveProfile, onTogglePrivacy }) {
   const [next, setNext] = useState("");
   const [confirm, setConfirm] = useState("");
   const [err, setErr] = useState("");
@@ -2042,14 +2146,6 @@ function SettingsView({ flash, hasWorkouts, onImportSeed, profile, email, onSave
           </div>
         </div>
       </div>
-
-      {!hasWorkouts && (
-        <div className="wt-settings-block">
-          <div className="wt-settings-title">Import spreadsheet history</div>
-          <p className="wt-hint">One-time import of the original Workout_tracking.xlsx sessions (May–Aug 2026). Intended for Srijan — it will add that history to <em>your</em> log.</p>
-          <button className="wt-secondary wide" onClick={onImportSeed}>Import history</button>
-        </div>
-      )}
 
       <div className="wt-settings-block">
         <div className="wt-settings-title">Account</div>
@@ -2273,7 +2369,8 @@ const CSS = `
 .wt-friend-row:hover{border-color:var(--accent)}
 .wt-friend-head{display:flex;align-items:center;gap:12px;margin-bottom:4px}
 .wt-friend-name{font-family:'Barlow Condensed',sans-serif;font-size:20px;font-weight:700;flex:1}
-.wt-toast{position:fixed;bottom:18px;left:50%;transform:translateX(-50%);background:var(--accent);color:var(--accent-ink);font-weight:700;padding:10px 18px;border-radius:999px;z-index:30}
+.wt-pending{display:block;color:var(--dim);font-weight:600;font-size:12px;letter-spacing:.02em;text-transform:none;margin-top:2px}
+.wt-toast{position:fixed;bottom:calc(18px + env(safe-area-inset-bottom));left:50%;transform:translateX(-50%);max-width:calc(100% - 32px);width:max-content;text-align:center;background:var(--accent);color:var(--accent-ink);font-weight:700;padding:10px 18px;border-radius:999px;z-index:30}
 @media (prefers-reduced-motion:no-preference){.wt-toast{animation:wt-pop .18s ease-out}}
 @keyframes wt-pop{from{transform:translateX(-50%) translateY(8px);opacity:0}}
 

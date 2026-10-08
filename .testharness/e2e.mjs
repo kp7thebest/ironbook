@@ -206,11 +206,180 @@ await page.waitForSelector(".wt-prog-name", { timeout: 3000 });
 check("'View progress chart' opens that exercise", /lat pulldown/i.test(await page.locator(".wt-prog-name").innerText()));
 await notBlank(page, "deep link");
 
+// ---------- v11 ----------
+const stub = (fn, arg) => page.evaluate(fn, arg);
+const serverRows = () => stub(() => window.__stub.server());
+const toastText = async () => (await page.waitForSelector(".wt-toast", { timeout: 6000 })).innerText();
+const waitToastGone = () => page.waitForSelector(".wt-toast", { state: "detached", timeout: 6000 }).catch(() => {});
+const goOnline = async () => { await stub(() => { window.__stub.offline = false; window.dispatchEvent(new Event("online")); }); };
+// Start an "upper" session, rename it, fill one set, finish.
+async function logSession(name) {
+  await page.locator(".wt-tab", { hasText: "Log" }).click();
+  await page.locator(".wt-chip", { hasText: /^upper$/ }).first().click();
+  await page.waitForSelector(".wt-card");
+  await page.locator(".wt-session-name").fill(name);
+  await page.locator(".wt-set-row input").nth(0).fill("50");
+  await page.locator(".wt-set-row input").nth(1).fill("8");
+  await waitToastGone();
+  await page.locator("button", { hasText: "Finish workout" }).click();
+}
+const histRow = (name) => page.locator(".wt-hist-head", { hasText: name }).first();
+
+console.log("\n12. F2 — save while offline, edit while offline, then reconnect");
+const before = (await serverRows()).length;
+await stub(() => { window.__stub.offline = true; });
+await logSession("offline test");
+check("finish offline -> 'Saved on this phone' toast", /saved offline|saved on this phone/i.test(await toastText()));
+check("history shows it as waiting to sync", /waiting to sync/i.test(await histRow("offline test").innerText()));
+check("History opens at the top, new session in view", (await page.evaluate(() => window.scrollY)) === 0 && await histRow("offline test").isVisible());
+check("nothing reached the server yet", (await serverRows()).length === before);
+await histRow("offline test").click();
+await page.locator("button", { hasText: "Edit session" }).click();
+await page.locator(".wt-session-name").fill("offline test edited");
+await waitToastGone();
+await page.locator(".wt-session-actions button", { hasText: "Save changes" }).click();
+check("edit offline -> kept on the phone", /saved offline|saved on this phone/i.test(await toastText()));
+check("edited name shown while offline", (await histRow("offline test edited").count()) === 1);
+await waitToastGone();
+await goOnline();
+check("reconnect -> 'Offline changes synced' toast", /offline changes synced/i.test(await toastText()));
+let rows = await serverRows();
+check("server now has exactly one copy, with the edit",
+  rows.filter((w) => /^offline test/.test(w.name)).length === 1 && rows.some((w) => w.name === "offline test edited"),
+  JSON.stringify(rows.filter((w) => /^offline test/.test(w.name)).map((w) => w.name)));
+check("'waiting to sync' label cleared", !/waiting to sync/i.test(await histRow("offline test edited").innerText()));
+check("queue emptied on the phone", (await stub(() => localStorage.getItem("ironbook:queue:user-me"))) === null);
+
+console.log("\n13. F2 — save reaches the server but the reply is lost (the duplicate case)");
+await waitToastGone();
+await stub(() => { window.__stub.loseNextReply = 1; });
+await logSession("lost reply test");
+check("lost reply -> treated as not yet synced", /saved offline|saved on this phone/i.test(await toastText()));
+check("...though the server did save it once", (await serverRows()).filter((w) => w.name === "lost reply test").length === 1);
+await waitToastGone();
+await goOnline();
+await page.waitForTimeout(600);
+check("retry does NOT create a second copy", (await serverRows()).filter((w) => w.name === "lost reply test").length === 1);
+check("label cleared after retry", !/waiting to sync/i.test(await histRow("lost reply test").innerText()));
+
+console.log("\n14. F2 — delete while offline");
+await waitToastGone();
+await stub(() => { window.__stub.offline = true; });
+await histRow("lost reply test").click();
+page.once("dialog", (d) => d.accept());
+await page.locator("button", { hasText: "Delete session" }).click();
+check("delete offline -> kept on the phone", /saved offline|saved on this phone/i.test(await toastText()));
+check("row gone from the list right away", (await histRow("lost reply test").count()) === 0);
+check("server still has it until reconnect", (await serverRows()).some((w) => w.name === "lost reply test"));
+await waitToastGone();
+await goOnline();
+await page.waitForTimeout(600);
+check("after reconnect the server deleted it", !(await serverRows()).some((w) => w.name === "lost reply test"));
+
+console.log("\n15. F3 — Import history removed");
+await page.locator(".wt-tab", { hasText: "Settings" }).click();
+await page.waitForTimeout(300);
+check("Settings has no Import history", !/import history|import spreadsheet/i.test(await bodyText(page)));
+
+console.log("\n16. F4 — no update banner on a normal launch");
+check("no banner without a new version", (await page.locator(".wt-update").count()) === 0);
+
 await page.locator(".wt-tab", { hasText: "Log" }).click();
 await page.waitForTimeout(300);
 await page.locator(".wt-chip", { hasText: /^upper$/ }).first().click();
 await page.waitForTimeout(600);
 await page.screenshot({ path: ".testharness/shot-log.png", fullPage: false });
+
+console.log("\n17. F2 — a v10-format offline queue is migrated and sent on launch");
+{
+  const p2 = await browser.newPage({ viewport: { width: 420, height: 900 } });
+  p2.on("pageerror", (e) => errors.push("pageerror(p2): " + e.message));
+  await p2.addInitScript(() => {
+    if (sessionStorage.getItem("seeded")) return;
+    sessionStorage.setItem("seeded", "1");
+    localStorage.setItem("ironbook:queue:user-me", JSON.stringify([
+      { date: "2026-10-01", name: "legacy queued", entries: [{ exercise: "squat", muscle: "quadriceps", sets: [{ weight: 100, reps: "5" }] }] },
+    ]));
+  });
+  await p2.goto(BASE);
+  await p2.waitForSelector(".wt-tabs", { timeout: 15000 });
+  const r2 = await p2.evaluate(() => window.__stub.server());
+  check("legacy queued session saved once", r2.filter((w) => w.name === "legacy queued").length === 1);
+  check("legacy queue cleared", (await p2.evaluate(() => localStorage.getItem("ironbook:queue:user-me"))) === null);
+  await p2.close();
+}
+
+console.log("\n18. F1 — sign-up needs the invite code");
+{
+  const p3 = await browser.newPage({ viewport: { width: 390, height: 844 } });
+  p3.on("pageerror", (e) => errors.push("pageerror(p3): " + e.message));
+  await p3.goto(BASE + "/?signedout=1");
+  await p3.waitForSelector(".wt-form.auth", { timeout: 15000 });
+  await p3.locator("button", { hasText: "Create an account" }).click();
+  check("sign-up form has an Invite code field", (await p3.locator("label", { hasText: "Invite code" }).count()) === 1);
+  const field = (label) => p3.locator("label", { hasText: label }).locator("input");
+  await field("Display name").fill("Nitant");
+  await field("Email").fill("nitant@example.com");
+  await field("Password").fill("secret123");
+  await p3.locator("button", { hasText: "Create account" }).click();
+  check("missing code -> asks for it", /enter the invite code/i.test(await p3.locator(".wt-err").innerText()));
+  await field("Invite code").fill("let-me-in");
+  await p3.locator("button", { hasText: "Create account" }).click();
+  await p3.waitForTimeout(200);
+  check("wrong code -> readable error, not 'Database error'",
+    /invite code didn’t work/i.test(await p3.locator(".wt-err").innerText()) && !/database error/i.test(await bodyText(p3)));
+  await p3.screenshot({ path: ".testharness/v11-signup.png" });
+  await field("Invite code").fill("lift-together");
+  await p3.locator("button", { hasText: "Create account" }).click();
+  await p3.waitForSelector(".wt-tabs", { timeout: 15000 }).catch(() => {});
+  check("right code -> account created, app opens", (await p3.locator(".wt-tabs").count()) === 1);
+  await p3.close();
+}
+
+console.log("\n19. F4 — new version: banner, Later, auto-refresh on reopen (not while editing)");
+{
+  const fs = await import("fs");
+  const SW = new URL("./dist-test/sw.js", import.meta.url);
+  const original = fs.readFileSync(SW, "utf8");
+  const ctx = await browser.newContext({ viewport: { width: 390, height: 844 } });
+  const p4 = await ctx.newPage();
+  p4.on("pageerror", (e) => errors.push("pageerror(p4): " + e.message));
+  try {
+    await p4.goto(BASE);
+    await p4.waitForSelector(".wt-tabs", { timeout: 15000 });
+    await p4.waitForFunction(() => navigator.serviceWorker && navigator.serviceWorker.controller, null, { timeout: 10000 });
+    await p4.waitForTimeout(300);
+    check("first install shows no banner", (await p4.locator(".wt-update").count()) === 0);
+    // Ship a "new version" of the service worker, then bring the app to the foreground.
+    let n = 0;
+    const shipNewVersion = () => fs.writeFileSync(SW, original + `\n// test build ${Date.now()}-${n++}\n`);
+    const resume = () => p4.evaluate(() => document.dispatchEvent(new Event("visibilitychange")));
+    shipNewVersion();
+    await resume();
+    await p4.waitForSelector(".wt-update", { timeout: 10000 }).catch(() => {});
+    check("app resume finds the new version -> banner", (await p4.locator(".wt-update").count()) === 1);
+    await p4.screenshot({ path: ".testharness/v11-update-banner.png" });
+    await p4.locator(".wt-update-later").click();
+    check("Later hides the banner", (await p4.locator(".wt-update").count()) === 0);
+    // While a past session is open for editing, reopening must NOT reload.
+    await p4.evaluate(() => { window.__marker = 1; });
+    await p4.locator(".wt-tab", { hasText: "History" }).click();
+    await p4.locator(".wt-hist-head").first().click();
+    await p4.locator("button", { hasText: "Edit session" }).click();
+    await resume();
+    await p4.waitForTimeout(800);
+    check("no auto-refresh while editing a past session", (await p4.evaluate(() => window.__marker)) === 1);
+    await p4.locator(".wt-editbar button", { hasText: "Cancel" }).click();
+    await resume();
+    await p4.waitForFunction(() => !window.__marker, null, { timeout: 8000 }).catch(() => {});
+    check("reopening the app after that refreshes it", (await p4.evaluate(() => window.__marker)) !== 1);
+    await p4.waitForSelector(".wt-tabs", { timeout: 15000 });
+    check("after refresh: app loads, no banner", (await p4.locator(".wt-update").count()) === 0);
+  } finally {
+    fs.writeFileSync(SW, original);
+    await ctx.close();
+  }
+}
 
 await browser.close();
 

@@ -33,11 +33,14 @@ export async function signIn(email, password) {
   const { error } = await supabase.auth.signInWithPassword({ email, password });
   if (error) throw error;
 }
-export async function signUp(email, password, displayName) {
+// The invite code is checked (and then removed from the user's metadata) by the database trigger
+// in supabase/patch_invite_code.sql. A wrong code makes Supabase answer
+// "Database error saving new user", which AuthScreen turns into a readable message.
+export async function signUp(email, password, displayName, inviteCode) {
   const { error } = await supabase.auth.signUp({
     email,
     password,
-    options: { data: { display_name: displayName } },
+    options: { data: { display_name: displayName, invite_code: inviteCode } },
   });
   if (error) throw error;
 }
@@ -95,10 +98,14 @@ export async function fetchWorkouts(userId) {
   if (error) throw error;
   return data;
 }
+// `w.id` is a UUID made on the phone (src/sync.js). Re-sending the same id fails with code 23505,
+// which the sync queue treats as "already saved" — so retries never create duplicates.
 export async function insertWorkout(userId, w) {
+  const row = { user_id: userId, date: w.date, name: w.name, entries: w.entries };
+  if (w.id) row.id = w.id;
   const { data, error } = await supabase
     .from("workouts")
-    .insert({ user_id: userId, date: w.date, name: w.name, entries: w.entries })
+    .insert(row)
     .select("id, date, name, entries")
     .single();
   if (error) throw error;
