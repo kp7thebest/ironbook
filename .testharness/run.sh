@@ -18,14 +18,22 @@ echo "  ✓ fixture rejected"
 echo "== 3/6 alias targets"
 node .testharness/check-aliases.mjs
 
-echo "== 4/6 offline-sync unit tests"
+echo "== 3b colour schemes (contrast checks; generated CSS up to date)"
+python3 .testharness/schemes.py --check src/styles.css
+
+echo "== 4/6 unit tests (offline sync; plate math, rename, notes)"
 node .testharness/sync-unit.mjs
+node .testharness/unit.mjs
 
 echo "== 5/6 production build"
 npx vite build --logLevel warn
 
 echo "== 6/6 end-to-end (stubbed database, real Chromium)"
 npx vite build --config .testharness/vite.test.config.js --logLevel warn
+# The stub must replace db.js everywhere. "ironbook-auth" only appears in the real db.js.
+if grep -q "ironbook-auth" .testharness/dist-test/assets/*.js; then
+  echo "✗ the test build still contains the real db.js — a db.js import escaped the stub alias"; exit 1
+fi
 if curl -s -o /dev/null http://localhost:4178; then
   echo "✗ something is already serving on port 4178 (an old preview?) — stop it first"; exit 1
 fi

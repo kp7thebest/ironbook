@@ -28,13 +28,21 @@ let workouts = {
     },
     ...SEED.map((w) => ({ id: uuid(), date: w.date, name: w.name, entries: w.entries })),
   ],
-  "user-friend": [],
+  // Srijan: a few lat pulldown sessions so "Compare with" has something to draw (v13).
+  "user-friend": [
+    ["2026-07-02", 55, "10"], ["2026-07-23", 60, "8"], ["2026-08-13", 62.5, "8"], ["2026-09-03", 65, "6"], ["2026-09-24", 67.5, "6"],
+  ].map(([date, weight, reps]) => ({ id: uuid(), date, name: "back day", entries: [
+    { exercise: "Lat Pulldown", muscle: "lats", sets: [{ weight: 40, reps: "10", warmup: true }, { weight, reps }] },
+  ] })),
 };
 let customs = { [ME]: [] };
 
 const S = (typeof window !== "undefined" ? (window.__stub = window.__stub || {}) : {});
-S.offline = false;
-S.loseNextReply = 0;
+if (S.offline === undefined) S.offline = false; // a test may set window.__stub = { offline: true } before load
+if (S.loseNextReply === undefined) S.loseNextReply = 0;
+if (S.noRoutinesTable === undefined) S.noRoutinesTable = false; // simulate patch_routines.sql not run yet
+if (S.noEffortColumn === undefined) S.noEffortColumn = false; // simulate patch_workout_effort.sql not run yet
+S.reads = 0; // counts fetchProfiles/fetchWorkouts calls (crew-cache checks)
 S.server = () => JSON.parse(JSON.stringify(workouts[ME]));
 S.calls = [];
 
@@ -80,27 +88,28 @@ export const sendPasswordReset = () => ok({});
 
 // ---- profiles ----
 export const fetchMyProfile = (id) => online() || ok(profiles.find((p) => p.id === id));
-export const fetchProfiles = () => online() || ok(profiles);
+export const fetchProfiles = () => { S.reads++; return online() || ok(profiles); };
 export const updateUnit = (id, unit) => { profiles = profiles.map((p) => (p.id === id ? { ...p, unit } : p)); return ok({}); };
 export const updatePrivacy = () => ok({});
 export const updateDisplayName = () => ok({});
 export const updateEmail = () => ok({});
 
 // ---- workouts (same contract as db.js, including Postgres error codes) ----
-export const fetchWorkouts = (id) => online() || ok(sortDesc(workouts[id] || []));
+export const fetchWorkouts = (id) => { S.reads++; return online() || ok(sortDesc(workouts[id] || [])); };
 export const insertWorkout = (id, w) => write("insert", () => {
   const list = workouts[id] || [];
   if (w.id && list.some((x) => x.id === w.id)) {
     const e = new Error('duplicate key value violates unique constraint "workouts_pkey"'); e.code = "23505"; throw e;
   }
   const row = { id: w.id || uuid(), date: w.date, name: w.name, entries: w.entries };
+  if (!S.noEffortColumn && w.effort != null) row.effort = w.effort;
   workouts[id] = [row, ...list];
   return row;
 });
 export const updateWorkout = (wid, w) => write("update", () => {
   const cur = workouts[ME].find((x) => x.id === wid);
   if (!cur) { const e = new Error("JSON object requested, multiple (or no) rows returned"); e.code = "PGRST116"; throw e; }
-  workouts[ME] = workouts[ME].map((x) => (x.id === wid ? { ...x, date: w.date, name: w.name, entries: w.entries } : x));
+  workouts[ME] = workouts[ME].map((x) => (x.id === wid ? { ...x, date: w.date, name: w.name, entries: w.entries, ...(S.noEffortColumn ? {} : { effort: w.effort ?? null }) } : x));
   return workouts[ME].find((x) => x.id === wid);
 });
 export const deleteWorkout = (wid) => write("delete", () => { workouts[ME] = workouts[ME].filter((x) => x.id !== wid); return {}; });
@@ -111,3 +120,21 @@ export const fetchAllCustom = () => ok([]);
 export const insertCustom = (id, c) => { customs[id] = [...(customs[id] || []), { ...c, id: uuid() }]; return ok({}); };
 export const updateCustom = () => ok({});
 export const deleteCustom = () => ok({});
+
+// ---- routines (v13) ----
+let routines = { [ME]: [] };
+const noTable = () => { const e = new Error("Could not find the table 'public.routines' in the schema cache"); e.code = "PGRST205"; return e; };
+export const fetchRoutines = (id) => (S.noRoutinesTable ? Promise.reject(noTable()) : online() || ok([...(routines[id] || [])].sort((a, b) => a.name.localeCompare(b.name))));
+export const saveRoutine = (id, r) => write("routine", () => {
+  if (S.noRoutinesTable) throw noTable();
+  const list = routines[id] || [];
+  const cur = list.find((x) => x.name === r.name);
+  const row = { id: cur ? cur.id : uuid(), name: r.name, entries: r.entries };
+  routines[id] = [...list.filter((x) => x.name !== r.name), row];
+  return row;
+});
+export const deleteRoutine = (rid) => write("routine-delete", () => { routines[ME] = (routines[ME] || []).filter((x) => x.id !== rid); return {}; });
+S.routines = () => JSON.parse(JSON.stringify(routines[ME]));
+
+// ---- effort column (v14) ----
+export const hasEffortColumn = () => !S.noEffortColumn;

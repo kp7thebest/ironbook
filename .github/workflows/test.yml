@@ -1,0 +1,40 @@
+# Runs the full Ironbook test harness (lint, unit tests, build, 100+ browser checks) on every push
+# and pull request. A red ✗ next to a commit on GitHub means something broke; the run's log says what.
+# Vercel deploys independently of this — a failing run does not stop a deploy.
+name: Tests
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  harness:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+          cache: npm
+
+      - name: Install app dependencies
+        run: npm ci
+
+      - name: Install test tools (kept out of package.json so Vercel installs stay fast)
+        run: npm i --no-save playwright@1.63.0 eslint@9 eslint-plugin-react-hooks@5 globals@15
+
+      - name: Install Chromium
+        run: npx playwright install --with-deps chromium
+
+      - name: Run the harness
+        run: bash .testharness/run.sh
+
+      - name: Keep screenshots from a failed run
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: harness-screenshots
+          path: .testharness/*.png
+          if-no-files-found: ignore

@@ -1,10 +1,10 @@
 // Screenshots of the v11 UI in both themes. Needs the test preview running on :4178.
-import { chromium } from "playwright";
+import { launch } from "./browser.mjs";
 import fs from "fs";
 const BASE = "http://localhost:4178";
 const SW = new URL("./dist-test/sw.js", import.meta.url);
 const original = fs.readFileSync(SW, "utf8");
-const b = await chromium.launch({ executablePath: "/opt/pw-browsers/chromium-1194/chrome-linux/chrome" });
+const b = await launch();
 try {
   for (const theme of ["dark", "light"]) {
     const ctx = await b.newContext({ viewport: { width: 390, height: 844 }, deviceScaleFactor: 2 });

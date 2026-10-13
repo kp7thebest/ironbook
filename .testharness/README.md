@@ -12,7 +12,7 @@ Playwright and ESLint are intentionally NOT in `package.json` — adding them wo
 Vercel installs slower. Install them when you want to run the checks:
 
 ```bash
-npm i --no-save playwright eslint@9 eslint-plugin-react-hooks@5 globals@15
+npm i --no-save playwright@1.63.0 eslint@9 eslint-plugin-react-hooks@5 globals@15
 npx playwright install chromium     # skip in the Claude sandbox (Chromium is preinstalled)
 
 bash .testharness/run.sh
@@ -20,16 +20,25 @@ bash .testharness/run.sh
 
 `run.sh` runs, in order, and stops at the first failure:
 
-1. **Lint** (`eslint.config.js`) — `react-hooks/rules-of-hooks` (the v8 bug) and undefined names.
+1. **Lint** (`eslint.config.js`) — `react-hooks/rules-of-hooks` (the v8 bug) and undefined names
+   (which also catches a missing import after moving code between modules).
 2. **Lint self-check** — `lint-fixtures/v8-hooks-bug.jsx` reproduces the v8 bug and must be rejected,
    proving the rule is switched on.
-3. **Alias check** — every `ALIASES` target in `App.jsx` is a real exercise-database name.
-4. **Offline-sync unit tests** (`sync-unit.mjs`) — the queue in `src/sync.js`: migration of the old
-   queue format, lost replies, going offline mid-sync, refused writes, edits/deletes made mid-sync.
+3. **Alias check** — every `ALIASES` target in `src/lib/registry.js` is a real exercise-database
+   name (and there are 60+, so a moved table can't make the check pass vacuously).
+3b. **Colour schemes** — `schemes.py --check` recomputes every scheme's colours, re-checks contrast
+   (text 4.5:1, accent 3:1, chart pairs incl. colour-blind separation) and fails if the generated block
+   in `src/styles.css` is out of date. Change a scheme in the script, then run `--write src/styles.css`.
+4. **Unit tests** — `sync-unit.mjs` (the offline queue in `src/sync.js`) and `unit.mjs` (plate math,
+   rename/merge, last note, cardio parsing, effort fallback).
 5. **Production build.**
-6. **End-to-end** (`e2e.mjs`) — builds the stubbed app, serves it on port 4178, drives real Chromium.
+6. **End-to-end** (`e2e.mjs`) — builds the stubbed app (and fails if the real `db.js` leaked into it),
+   serves it on port 4178, drives real Chromium.
 
-Exits 0 when everything passes. As of v11: 21 unit checks + 84 browser checks.
+Exits 0 when everything passes. As of v14: 30 + 60 unit checks + 187 browser checks.
+GitHub Actions runs the same script on every push (`.github/workflows/test.yml`).
+
+Note: `npm uninstall <pkg>` removes `--no-save` packages too — reinstall the tools afterwards.
 
 ## What the browser checks cover
 
@@ -50,12 +59,29 @@ Exits 0 when everything passes. As of v11: 21 unit checks + 84 browser checks.
 - **v11** sign-up: invite code required; a wrong code shows a readable message
 - **v11** update banner: none on first install; appears when a new `sw.js` ships; Later hides it;
   reopening the app refreshes it, except while a past session is open for editing
+- **v12** launch: no fixed wait; reopening offline shows the saved log; exercise list loads after first
+  paint; sign-out removes the saved copy; crew data shown from cache and refreshed
+- **v12** Excel export downloads a real multi-sheet .xlsx
+- **v12** bottom navigation: five tabs, pinned, 44px+ targets, content never hidden behind it; More
+  remembers its place
+- **v12** notes saved, shown in History and on the next session's card; plate math (bar switch);
+  rename across the log and merge into another exercise
+- **v13** warm-ups excluded from 1RM and volume; volume heatmap counts match the data; compare chart
+  (legend, values, tap, table); rest timer (start, ±15, stays across tabs, off switch, fake-clock end and
+  auto-clear); routines (save from Log and History, start, warm-ups kept, delete, missing-table message)
+- **layout** at 360 px in both themes: no sideways scroll, header controls on screen, set row fits
 - no unexpected console/page errors (external font/CDN failures are ignored)
+
+## Finding Chromium
+
+`browser.mjs` uses `CHROME_PATH` if set, else the Claude sandbox's preinstalled Chromium, else
+Playwright's own download (`npx playwright install chromium`, as CI does).
 
 ## Stub controls (for writing new checks)
 
 `db-stub.js` exposes `window.__stub` in the test build:
-`offline = true` makes every call fail like a dropped connection; `loseNextReply = n` lets the next
+`offline = true` makes every call fail like a dropped connection (set `window.__stub = { offline: true }`
+in an init script to start offline); `loseNextReply = n` lets the next
 n writes reach the "server" but loses the reply; `server()` returns my workouts as the server has
 them. Open the app with `?signedout=1` to start on the sign-in screen; the valid invite code is
 `lift-together`. `seed.js` (Srijan's 41 spreadsheet sessions) lives here now — the app no longer
@@ -63,10 +89,6 @@ ships it.
 
 ## Screenshots
 
-`shots-v10.mjs` / `shots-v11.mjs` save PNGs of the newest screens (both themes) while the preview is
+`shots-all.mjs <dir>` saves every screen in both themes; `shots-v10/11/12/14.mjs` save PNGs of the newest screens (both themes) while the preview is
 running. Look at them before packaging — the checks don't catch cramped labels.
 
-## Note on `chromium.launch()`
-
-The scripts pass an `executablePath` pointing at the sandbox's preinstalled Chromium. On your own
-machine, after `npx playwright install chromium`, delete that option.
