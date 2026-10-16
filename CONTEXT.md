@@ -46,7 +46,7 @@ gh auth switch --hostname github.com --user kp7thebest
 gh auth setup-git
 git remote set-url origin https://kp7thebest@github.com/kp7thebest/ironbook.git
 git config user.name "kp7thebest"
-git config user.email "kp7thebest@users.noreply.github.com"
+git config user.email "karthik.lal.periasamy@gmail.com"
 gh api user --jq .login
 git push --dry-run
 ```
