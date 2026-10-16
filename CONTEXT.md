@@ -26,26 +26,18 @@ exercises with demo animations, and see each other's training.
 
 ## 2. How changes get shipped (read this first)
 
-The code is edited in a Claude sandbox, not on the Mac. The loop is:
+Since 16 Oct 2026 the code is worked on with **Claude Code in the repo itself** (`~/Downloads/ironbook` on the Mac).
+The loop is:
 
-1. Claude edits, **runs `bash .testharness/run.sh`**, and delivers `ironbook-vNN.zip`.
-2. Karthik unzips it in `~/Downloads`. macOS names it `ironbook 2` / `ironbook 3`… because
-   `~/Downloads/ironbook` (the real git repo) already exists.
-3. Copy into the repo and push (paste without `#` comments — zsh rejects them):
-   ```bash
-   ls ~/Downloads | grep -i ironbook
-   cd ~/Downloads/ironbook
-   cp -R ~/Downloads/"ironbook 2"/. .
-   chmod +x push.sh
-   ./push.sh "short description"
-   ```
-   **`cp` never deletes.** When a release removes a file, delete it in the repo before pushing
-   (each release's notes say which, e.g. v11: `rm src/seed.js`).
-4. If the release includes a `supabase/patch_*.sql`, run it in the Supabase SQL editor (the notes say
-   whether it must go before or after the push).
-5. GitHub runs the tests (a ✓ or ✗ appears next to the commit on github.com; a failure emails you).
-   Vercel deploys regardless, in ~1 min. Open apps show **"New version ready · Refresh"** and refresh
-   themselves the next time they're reopened.
+1. Claude edits, runs `npm test` (= `bash .testharness/run.sh`), commits as kp7thebest and pushes.
+2. If the change includes a `supabase/patch_*.sql`, Karthik runs it in the Supabase SQL editor (Claude says
+   whether before or after the push).
+3. GitHub runs the tests (✓ / ✗ next to the commit on github.com; a failure emails you). Vercel deploys
+   regardless, in ~1 min. Open apps show **"New version ready · Refresh"**.
+
+`push.sh "message"` still works for a manual commit + push. (Before 16 Oct, releases were zips built in a
+Claude sandbox and copied over the repo — `cp` never deleted files, so check for leftovers if something
+looks stale.)
 
 ### Pushing as kp7thebest (one-time setup per Mac)
 ```bash
@@ -66,8 +58,6 @@ git push --dry-run
 | `403 … denied to karthikperiasamy-nc` | Mac's git credential is Karthik's work account | Setup above. Still failing: delete `github.com` in Keychain Access |
 | `Password authentication is not supported` | git is asking for a password instead of using gh's token | `gh auth setup-git`, then `git push` |
 | `permission denied: ./push.sh` | `cp` dropped the exec bit | `chmod +x push.sh`, or `bash push.sh "msg"` |
-| `cp: … are identical` | Terminal is *inside* the unzipped copy, not the repo | `cd ~/Downloads/ironbook` first |
-| `git status` shows nothing after copying | Wrong source folder name | Check `ls ~/Downloads \| grep -i ironbook` |
 | zsh `accepts 0 arg(s), received N` | Pasted a command with an inline `# comment` | Paste commands without comments |
 | Phone still shows old UI | Service worker cache | Tap Refresh on the banner / reopen; bump `CACHE` in `public/sw.js` when the shell changes |
 | iPhone opens in Safari, not full-screen | Icon was added before the manifest existed | Delete icon, re-add from **Safari** (Chrome on iOS can't install PWAs) |
@@ -120,7 +110,7 @@ supabase/patch_routines.sql           v13: routines table + owner-only RLS
 supabase/patch_workout_effort.sql     v14: workouts.effort smallint (1–10 check), reloads the API schema
 .github/workflows/test.yml            v12: runs .testharness/run.sh on every push / PR
 .testharness/                         all pre-release checks (§8); seed.js = test data
-push.sh  SETUP.md  .env.example
+push.sh  SETUP.md  .env.example  CLAUDE.md (Claude Code instructions; imports this file)
 ```
 
 ---
@@ -279,7 +269,7 @@ swaps the chart weight/reps colours too. Muscle plate colours don't change.
 
 1. **All React hooks go above any early `return`.** The lint step (`react-hooks/rules-of-hooks`) fails
    the harness on this. `App` keeps its early returns inside the nested `renderScreen()`.
-2. **Run `bash .testharness/run.sh` before packaging** (§8). CI runs it again on GitHub.
+2. **Run `npm test` before every commit** (§8). CI runs it again on GitHub.
 3. **Look at screenshots** of anything visual in both themes (`shots-v12.mjs` etc.).
 4. Adding an alias? Every target must be an exact DB name (`run.sh` checks; it fails below 60 aliases).
 5. Changing the app shell or anything cached? Bump `CACHE` in `public/sw.js`.
